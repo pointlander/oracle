@@ -114,9 +114,9 @@ func decodeTransition(bits string) (Transition, bool) {
 		return Transition{}, false
 	}
 
-	writeSym := bits
+	writeSym := bits[0]
 	moveDir := -1
-	if bits == "1" {
+	if bits[1] == '1' {
 		moveDir = 1
 	}
 
@@ -126,7 +126,7 @@ func decodeTransition(bits string) (Transition, bool) {
 	}
 
 	return Transition{
-		WriteSymbol: writeSym[0],
+		WriteSymbol: writeSym,
 		MoveDir:     moveDir,
 		NextState:   int(nextStateVal),
 	}, true
