@@ -177,6 +177,7 @@ func main() {
 		"0111#00", // Halts immediately when reading '0' (Bit 2 is '1') -> Should fail
 		"0100#00", // Writes '0', moves right, stays in state 0 forever -> Should pass
 		"10101",   // Missing '#' separator -> Syntax failure
+		"0100#1",  // This statement cannot be proven
 	}
 
 	for _, s := range testStrings {
