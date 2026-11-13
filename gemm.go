@@ -12,8 +12,18 @@ import (
 // parallelRange splits work [0,n) across cores when cost is large enough
 // that the launch overhead is worth it. fn ranges are contiguous and disjoint.
 func parallelRange(n, cost int, fn func(start, end int)) {
+	if cost < 80_000 {
+		fn(0, n)
+		return
+	}
+	parallelN(n, fn)
+}
+
+// parallelN splits [0,n) across cores. One core, or n < 2, runs fn inline.
+// fn ranges are contiguous and disjoint.
+func parallelN(n int, fn func(start, end int)) {
 	workers := runtime.GOMAXPROCS(0)
-	if workers < 2 || n < 2 || cost < 80_000 {
+	if workers < 2 || n < 2 {
 		fn(0, n)
 		return
 	}

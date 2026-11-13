@@ -258,27 +258,46 @@ func machineFromHard(hard []float32, states, inputLen int, groups []stGroup) (st
 	return EncodeMachine(mp), string(input)
 }
 
+// haltBits runs one oracle query per batch row.
+// Halts only reads MaxSteps, so the calls share one simulator.
+// Counters and the recorded example query are updated after the calls join.
+func (o *oracleLayer) haltBits(hard []float32, B int) []int {
+	F := o.Feat
+	machines := make([]string, B)
+	tapes := make([]string, B)
+	for b := 0; b < B; b++ {
+		machines[b], tapes[b] = machineFromHard(hard[b*F:(b+1)*F], o.States, o.InputLen, o.Groups)
+	}
+	halt := make([]bool, B)
+	parallelN(B, func(i, j int) {
+		for b := i; b < j; b++ {
+			halt[b] = o.Sim.Halts(machines[b], tapes[b])
+		}
+	})
+	haltIdx := make([]int, B)
+	nHalt := 0
+	for b := 0; b < B; b++ {
+		if halt[b] {
+			haltIdx[b] = 1
+			nHalt++
+		}
+	}
+	o.Calls += B
+	o.Halts += nHalt
+	if B > 0 {
+		o.LastM = machines[0]
+		o.LastW = tapes[0]
+		o.LastHalt = halt[0]
+	}
+	return haltIdx
+}
+
 // Forward returns the residual delta [B*T, D] and a scalar BCE against the oracle bit.
 func (o *oracleLayer) Forward(h *Tensor, B, T int) (*Tensor, *Tensor) {
 	pooled := MeanSeq(h, B, T)
 	logits := AddBias(MatMul(pooled, o.QueryW), o.QueryB)
 	st := MixedST(logits, o.Groups)
-	haltIdx := make([]int, B)
-	F := o.Feat
-	for b := 0; b < B; b++ {
-		m, w := machineFromHard(st.Data[b*F:(b+1)*F], o.States, o.InputLen, o.Groups)
-		halt := o.Sim.Halts(m, w)
-		o.Calls++
-		if halt {
-			haltIdx[b] = 1
-			o.Halts++
-		}
-		if b == 0 {
-			o.LastM = m
-			o.LastW = w
-			o.LastHalt = halt
-		}
-	}
+	haltIdx := o.haltBits(st.Data, B)
 	bit := AddBias(MatMul(st, o.BitW), o.BitB)
 	ans := Embedding(o.Answer, haltIdx)
 	delta := RepeatSeq(Add(bit, ans), T)

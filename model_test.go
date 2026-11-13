@@ -340,6 +340,39 @@ func TestMachineEncodingMatchesFormat(t *testing.T) {
 	}
 }
 
+func TestOracleBatchMatchesSerial(t *testing.T) {
+	rng := rand.New(rand.NewSource(9))
+	sim := &UniversalBoundedSimulator{MaxSteps: 32}
+	o := newOracleLayer(8, 2, 8, rng, sim)
+	B := 17
+	hard := make([]float32, B*o.Feat)
+	for i := range hard {
+		hard[i] = float32(rng.Intn(2))
+	}
+	got := o.haltBits(hard, B)
+	if o.Calls != B {
+		t.Fatalf("calls %d", o.Calls)
+	}
+	halts := 0
+	for b := 0; b < B; b++ {
+		m, w := machineFromHard(hard[b*o.Feat:(b+1)*o.Feat], o.States, o.InputLen, o.Groups)
+		want := 0
+		if sim.Halts(m, w) {
+			want = 1
+			halts++
+		}
+		if got[b] != want {
+			t.Fatalf("row %d got %d want %d", b, got[b], want)
+		}
+		if b == 0 && (o.LastM != m || o.LastW != w || o.LastHalt != (want == 1)) {
+			t.Fatalf("example m=%s w=%s halt=%v", o.LastM, o.LastW, o.LastHalt)
+		}
+	}
+	if o.Halts != halts {
+		t.Fatalf("halt count %d want %d", o.Halts, halts)
+	}
+}
+
 func TestOraclePathReceivesGrad(t *testing.T) {
 	autogradEnabled = true
 	rng := rand.New(rand.NewSource(5))
