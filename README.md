@@ -49,6 +49,17 @@ On that command, seed 42, validation next-byte cross-entropy was 1.82 nats (perp
 
 Checkpoints go to `checkpoints/` (`best.gob`, `result.json`, `train.log`). That directory is gitignored. Pass `-out ""` to skip writing it, and `-sample 0` to skip the generated continuation.
 
+## Inference
+
+`infer` loads a checkpoint and continues a prompt. Each new byte is one random draw from the model's next-byte distribution. Logits are divided by the temperature before the softmax: `1` leaves the distribution unchanged, lower values make it sharper, and `0` is greedy.
+
+```bash
+go run . infer -prompt "To be, or not to be" -temp 0.8 -n 200
+go run . infer -h
+```
+
+The default checkpoint is `checkpoints/best.gob`. A negative `-seed` (the default) uses the current time, so two runs differ. Pass `-seed 1` to repeat a sample.
+
 ## Tests
 
 ```bash

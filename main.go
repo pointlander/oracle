@@ -221,9 +221,19 @@ func randomBinaryString(length int) string {
 // ============================================================================
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "train" || os.Args[1] == "-train") {
-		if err := trainFromArgs(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "train: %v\n", err)
+	if len(os.Args) > 1 {
+		var err error
+		switch os.Args[1] {
+		case "train", "-train":
+			err = trainFromArgs(os.Args[2:])
+		case "infer", "generate", "-infer":
+			err = inferFromArgs(os.Args[2:])
+		default:
+			demo()
+			return
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", os.Args[1], err)
 			os.Exit(1)
 		}
 		return

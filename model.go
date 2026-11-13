@@ -406,7 +406,9 @@ func (m *OracleTransformer) Loss(toks, tgt []int, B, T int) (total, ce, aux *Ten
 	return total, ce, aux, halt
 }
 
-// Generate continues prompt by n bytes. Temperature <= 0 is greedy.
+// Generate continues prompt by n bytes.
+// Each byte is one draw from softmax(logits / temperature).
+// Temperature <= 0 picks the mode instead of sampling.
 func (m *OracleTransformer) Generate(prompt []byte, n int, temp float64, rng *rand.Rand) []byte {
 	if len(prompt) == 0 {
 		prompt = []byte{'\n'}
