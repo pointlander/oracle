@@ -469,6 +469,113 @@ func TestGenerateAndLearn(t *testing.T) {
 	}
 }
 
+func refNN(M, N, K int, A, B, C []float32) {
+	for i := 0; i < M; i++ {
+		for p := 0; p < K; p++ {
+			av := A[i*K+p]
+			for j := 0; j < N; j++ {
+				C[i*N+j] += av * B[p*N+j]
+			}
+		}
+	}
+}
+
+func refAD(M, N, K int, dC, B, dA []float32) {
+	for i := 0; i < M; i++ {
+		for p := 0; p < K; p++ {
+			var s float32
+			for j := 0; j < N; j++ {
+				s += dC[i*N+j] * B[p*N+j]
+			}
+			dA[i*K+p] += s
+		}
+	}
+}
+
+func refBD(M, N, K int, A, dC, dB []float32) {
+	for k := 0; k < K; k++ {
+		for m := 0; m < M; m++ {
+			av := A[m*K+k]
+			for j := 0; j < N; j++ {
+				dB[k*N+j] += av * dC[m*N+j]
+			}
+		}
+	}
+}
+
+func gemmClose(got, want float32, exact bool) bool {
+	if exact || got == want {
+		return got == want
+	}
+	diff := math.Abs(float64(got - want))
+	scale := math.Abs(float64(want))
+	if scale < 1 {
+		scale = 1
+	}
+	return diff <= 1e-4*scale
+}
+
+func TestGemmMatchesReference(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	shapes := [][3]int{
+		{1, 1, 1},
+		{2, 2, 2},
+		{3, 3, 5},
+		{4, 4, 4},
+		{5, 7, 3},
+		{8, 32, 1},
+		{8, 32, 5},
+		{6, 6, 6},
+		{17, 13, 11},
+		{32, 64, 15},
+		{65, 50, 36},
+	}
+	fill := func(n int) []float32 {
+		s := make([]float32, n)
+		for i := range s {
+			s[i] = float32(rng.Float64()*2 - 1)
+		}
+		return s
+	}
+	for _, sh := range shapes {
+		M, N, K := sh[0], sh[1], sh[2]
+		exact := N < 4
+		A := fill(M * K)
+		B := fill(K * N)
+		C0 := fill(M * N)
+		dC := fill(M * N)
+		dA0 := fill(M * K)
+		dB0 := fill(K * N)
+
+		wantC := append([]float32(nil), C0...)
+		gotC := append([]float32(nil), C0...)
+		refNN(M, N, K, A, B, wantC)
+		gemmNN(M, N, K, A, B, gotC)
+
+		wantA := append([]float32(nil), dA0...)
+		gotA := append([]float32(nil), dA0...)
+		refAD(M, N, K, dC, B, wantA)
+		gemmAD(M, N, K, dC, B, gotA)
+
+		wantB := append([]float32(nil), dB0...)
+		gotB := append([]float32(nil), dB0...)
+		refBD(M, N, K, A, dC, wantB)
+		gemmBD(M, N, K, A, dC, gotB)
+
+		check := func(name string, got, want []float32) {
+			t.Helper()
+			for i := range want {
+				if !gemmClose(got[i], want[i], exact) {
+					t.Fatalf("%s %v [%d] got %v want %v", name, sh, i, got[i], want[i])
+				}
+			}
+		}
+		check("NN", gotC, wantC)
+		check("AD", gotA, wantA)
+		check("BD", gotB, wantB)
+	}
+}
+
 func BenchmarkGemm(b *testing.B) {
 	M, N, K := 1024, 256, 64
 	A := make([]float32, M*K)

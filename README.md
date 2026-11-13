@@ -30,6 +30,8 @@ The simulator is not differentiated. A straight-through estimator on the machine
 
 The default model is a byte-level language model: vocabulary 256, 3 layers, width 64, 4 heads, context 64. Each query is a 2-state machine on an 8-bit tape, simulated for at most 64 steps.
 
+Matrix products use the standard library `simd` package when Go is built with `GOEXPERIMENT=simd`. On this machine that is 128-bit NEON: four float32 lanes and a fused multiply-add. With the experiment off, those kernels are scalar float32. A product narrower than one vector matches the scalar kernel bit for bit. Wider products agree to about `1e-4` relative.
+
 ## Training
 
 `100.txt.utf-8` is the training text (Project Gutenberg eBook #100). The first 90% of the bytes are training windows. The last 10% are validation. The two slices do not overlap.
