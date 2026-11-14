@@ -62,10 +62,10 @@ go run . infer -h
 
 The default checkpoint is `checkpoints/best.gob`. A negative `-seed` (the default) uses the current time, so two runs differ. Pass `-seed 1` to repeat a sample.
 
-`-mcts` chooses each new byte with Monte Carlo tree search instead of one draw. A simulation expands the top `-width` next bytes, looks ahead `-horizon` bytes, and scores that path by the average probability the model assigned. The byte with the most visits is written, then the search starts again from the extended text. `-temp` shapes the distribution inside the search. `-puct` is the exploration constant.
+`-mcts` draws `-sims` continuations. Each byte is sampled from the temperature softmax, and a continuation is scored by the sum of the log probabilities of its bytes. The continuation with the highest sum is printed.
 
 ```bash
-go run . infer -mcts -sims 8 -width 4 -horizon 4 -prompt "To be, or not to be" -n 80
+go run . infer -mcts -sims 8 -prompt "To be, or not to be" -temp 0.8 -n 80
 ```
 
 ## Tests

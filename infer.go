@@ -46,7 +46,7 @@ func loadCheckpoint(path string) (*OracleTransformer, int, float64, error) {
 func inferFromArgs(args []string) error {
 	fs := flag.NewFlagSet("infer", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: oracle infer [flags]\n\nContinue a prompt by sampling the next-byte distribution at a temperature.\nTemperature 1 is the model's softmax. Lower values sharpen it. 0 is greedy.\n\n-mcts chooses each byte by Monte Carlo tree search. Each simulation looks ahead -horizon bytes\nand scores them by the average probability the model assigned. The most-visited byte is kept.\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: oracle infer [flags]\n\nContinue a prompt by sampling the next-byte distribution at a temperature.\nTemperature 1 is the model's softmax. Lower values sharpen it. 0 is greedy.\n\n-mcts draws -sims rollouts from that softmax. Each rollout is scored by the sum of its log probabilities.\nThe rollout with the highest sum is the continuation.\n\n")
 		fs.PrintDefaults()
 	}
 	path := fs.String("checkpoint", "checkpoints/best.gob", "trained weights")
@@ -54,11 +54,8 @@ func inferFromArgs(args []string) error {
 	n := fs.Int("n", 200, "bytes to generate")
 	temp := fs.Float64("temp", 0.8, "softmax temperature")
 	seed := fs.Int64("seed", -1, "RNG seed; negative uses the current time")
-	mcts := fs.Bool("mcts", false, "choose each byte with Monte Carlo tree search")
-	sims := fs.Int("sims", 8, "MCTS simulations per output byte")
-	width := fs.Int("width", 4, "MCTS children kept at each node")
-	horizon := fs.Int("horizon", 4, "MCTS lookahead in bytes")
-	puct := fs.Float64("puct", 1.5, "MCTS exploration constant")
+	mcts := fs.Bool("mcts", false, "sample several rollouts and keep the highest log-probability sum")
+	sims := fs.Int("sims", 8, "number of MCTS rollouts")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -85,19 +82,10 @@ func inferFromArgs(args []string) error {
 		if *sims < 1 {
 			return fmt.Errorf("sims must be positive")
 		}
-		if *width < 1 {
-			return fmt.Errorf("width must be positive")
-		}
-		if *horizon < 1 {
-			return fmt.Errorf("horizon must be positive")
-		}
-		if *puct < 0 {
-			return fmt.Errorf("puct must be non-negative")
-		}
 		sample = model.GenerateMCTS([]byte(*prompt), *n, MCTSConfig{
-			Sims: *sims, Width: *width, Horizon: *horizon, PUCT: *puct, Temp: *temp,
+			Sims: *sims, Temp: *temp,
 		}, rng)
-		fmt.Fprintf(os.Stderr, "checkpoint %s  step %d  val_ce %.4f  temp %.3f  seed %d  mcts sims %d width %d horizon %d puct %.2f\n", *path, step, val, *temp, s, *sims, *width, *horizon, *puct)
+		fmt.Fprintf(os.Stderr, "checkpoint %s  step %d  val_ce %.4f  temp %.3f  seed %d  mcts sims %d\n", *path, step, val, *temp, s, *sims)
 	} else {
 		sample = model.Generate([]byte(*prompt), *n, *temp, rng)
 		fmt.Fprintf(os.Stderr, "checkpoint %s  step %d  val_ce %.4f  temp %.3f  seed %d\n", *path, step, val, *temp, s)

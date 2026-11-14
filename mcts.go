@@ -7,71 +7,14 @@ package main
 import (
 	"math"
 	"math/rand"
-	"sort"
 )
 
-// MCTSConfig is a per-byte Monte Carlo tree search over the model's next-byte distribution.
-// Each simulation expands the Width most likely bytes, looks ahead Horizon bytes,
-// and scores the path by the average probability the model assigned to those bytes.
-// The committed byte is the root child with the most visits.
+// MCTSConfig samples Sims continuations and keeps the one with the highest score.
+// Each byte of a rollout is drawn from softmax(logits / Temp).
+// The score is the sum of the log probabilities of the bytes in that rollout.
 type MCTSConfig struct {
-	Sims    int
-	Width   int
-	Horizon int
-	PUCT    float64
-	Temp    float64
-}
-
-type mctsNode struct {
-	tok      int
-	prior    float64
-	prob     float64
-	visits   int
-	valueSum float64
-	children []*mctsNode
-}
-
-func (n *mctsNode) q() float64 {
-	if n.visits == 0 {
-		return 0
-	}
-	return n.valueSum / float64(n.visits)
-}
-
-// bestChild is the PUCT choice. Unvisited nodes have Q = 0, so the prior term
-// orders the first visit. A parent with no completed simulations uses a visit
-// count of 1 so that term is not zero.
-func (n *mctsNode) bestChild(c float64) *mctsNode {
-	parentN := n.visits
-	if parentN < 1 {
-		parentN = 1
-	}
-	sqrtN := math.Sqrt(float64(parentN))
-	best := n.children[0]
-	bestScore := math.Inf(-1)
-	for _, ch := range n.children {
-		score := ch.q() + c*ch.prior*sqrtN/(1+float64(ch.visits))
-		if score > bestScore || (score == bestScore && ch.tok < best.tok) {
-			best = ch
-			bestScore = score
-		}
-	}
-	return best
-}
-
-func (n *mctsNode) chosen() *mctsNode {
-	var best *mctsNode
-	for _, ch := range n.children {
-		if ch.visits == 0 {
-			continue
-		}
-		if best == nil || ch.visits > best.visits ||
-			(ch.visits == best.visits && ch.q() > best.q()) ||
-			(ch.visits == best.visits && ch.q() == best.q() && ch.tok < best.tok) {
-			best = ch
-		}
-	}
-	return best
+	Sims int
+	Temp float64
 }
 
 func byteDist(logits []float32, temp float64) []float64 {
@@ -126,114 +69,50 @@ func sampleDist(probs []float64, rng *rand.Rand) int {
 	return len(probs) - 1
 }
 
-func topChildren(probs []float64, width int) []*mctsNode {
-	if width < 1 {
-		width = 1
-	}
-	idx := make([]int, len(probs))
-	for i := range idx {
-		idx[i] = i
-	}
-	sort.Slice(idx, func(i, j int) bool {
-		if probs[idx[i]] == probs[idx[j]] {
-			return idx[i] < idx[j]
-		}
-		return probs[idx[i]] > probs[idx[j]]
-	})
-	if width > len(idx) {
-		width = len(idx)
-	}
-	var sum float64
-	for i := 0; i < width; i++ {
-		sum += probs[idx[i]]
-	}
-	kids := make([]*mctsNode, 0, width)
-	for i := 0; i < width; i++ {
-		p := probs[idx[i]]
-		if p == 0 || sum == 0 {
-			continue
-		}
-		kids = append(kids, &mctsNode{tok: idx[i], prior: p / sum, prob: p})
-	}
-	return kids
-}
-
-// mctsSimulate walks one PUCT path, expands a leaf, and backs up the mean
-// probability of the lookahead bytes.
-func mctsSimulate(root *mctsNode, prefix []byte, cfg MCTSConfig, rng *rand.Rand, logitsOf func([]byte) []float32) {
-	node := root
-	path := []*mctsNode{root}
-	buf := append([]byte{}, prefix...)
-	for len(node.children) > 0 && len(path)-1 < cfg.Horizon {
-		node = node.bestChild(cfg.PUCT)
-		path = append(path, node)
-		buf = append(buf, byte(node.tok))
-	}
-	if len(path)-1 < cfg.Horizon && len(node.children) == 0 {
-		node.children = topChildren(byteDist(logitsOf(buf), cfg.Temp), cfg.Width)
-		if len(node.children) > 0 {
-			node = node.bestChild(cfg.PUCT)
-			path = append(path, node)
-			buf = append(buf, byte(node.tok))
-		}
-	}
-	acc := 0.0
-	count := 0
-	for _, nd := range path[1:] {
-		acc += nd.prob
-		count++
-	}
-	for count < cfg.Horizon {
-		probs := byteDist(logitsOf(buf), cfg.Temp)
-		if len(probs) == 0 {
-			break
-		}
-		tok := sampleDist(probs, rng)
-		acc += probs[tok]
-		count++
-		buf = append(buf, byte(tok))
-	}
-	value := 0.0
-	if count > 0 {
-		value = acc / float64(count)
-	}
-	for _, nd := range path {
-		nd.visits++
-		nd.valueSum += value
-	}
-}
-
-// searchMCTS returns n bytes. logitsOf is the next-byte logit vector at a prefix.
-func searchMCTS(prompt []byte, n int, cfg MCTSConfig, rng *rand.Rand, logitsOf func([]byte) []float32) []byte {
-	ensure(cfg.Sims >= 1, "mcts sims %d", cfg.Sims)
-	ensure(cfg.Width >= 1, "mcts width %d", cfg.Width)
-	ensure(cfg.Horizon >= 1, "mcts horizon %d", cfg.Horizon)
-	ensure(cfg.PUCT >= 0, "mcts puct %v", cfg.PUCT)
-	if len(prompt) == 0 {
-		prompt = []byte{'\n'}
-	}
+// sampleRollout draws n bytes and returns them with the sum of their log probabilities.
+func sampleRollout(prompt []byte, n int, temp float64, rng *rand.Rand, logitsOf func([]byte) []float32) ([]byte, float64) {
 	buf := append([]byte{}, prompt...)
 	out := make([]byte, 0, n)
-	for len(out) < n {
-		root := &mctsNode{}
-		for s := 0; s < cfg.Sims; s++ {
-			mctsSimulate(root, buf, cfg, rng, logitsOf)
+	var sum float64
+	for i := 0; i < n; i++ {
+		probs := byteDist(logitsOf(buf), temp)
+		tok := sampleDist(probs, rng)
+		p := 0.0
+		if tok >= 0 && tok < len(probs) {
+			p = probs[tok]
 		}
-		ch := root.chosen()
-		var tok int
-		if ch == nil {
-			tok = sampleDist(byteDist(logitsOf(buf), cfg.Temp), rng)
+		if p > 0 {
+			sum += math.Log(p)
 		} else {
-			tok = ch.tok
+			sum = math.Inf(-1)
 		}
 		out = append(out, byte(tok))
 		buf = append(buf, byte(tok))
 	}
-	return out
+	return out, sum
 }
 
-// GenerateMCTS continues prompt by n bytes. Each byte is the most-visited
-// child of a fresh tree rooted at the text so far.
+// searchMCTS returns the sampled rollout whose log-probability sum is highest.
+func searchMCTS(prompt []byte, n int, cfg MCTSConfig, rng *rand.Rand, logitsOf func([]byte) []float32) []byte {
+	ensure(cfg.Sims >= 1, "mcts sims %d", cfg.Sims)
+	ensure(n >= 1, "mcts n %d", n)
+	if len(prompt) == 0 {
+		prompt = []byte{'\n'}
+	}
+	best, bestSum := sampleRollout(prompt, n, cfg.Temp, rng, logitsOf)
+	for s := 1; s < cfg.Sims; s++ {
+		roll, sum := sampleRollout(prompt, n, cfg.Temp, rng, logitsOf)
+		if sum > bestSum {
+			best = roll
+			bestSum = sum
+		}
+	}
+	return best
+}
+
+// GenerateMCTS continues prompt by n bytes.
+// It samples Sims rollouts from the temperature softmax and returns the one
+// with the highest sum of log probabilities.
 func (m *OracleTransformer) GenerateMCTS(prompt []byte, n int, cfg MCTSConfig, rng *rand.Rand) []byte {
 	was := autogradEnabled
 	autogradEnabled = false

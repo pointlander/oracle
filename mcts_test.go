@@ -6,13 +6,14 @@ package main
 
 import (
 	"bytes"
+	"math"
 	"math/rand"
 	"testing"
 )
 
-// A one-step greedy choice prefers token 0. Two-step search prefers token 1,
-// because the model is confident about the byte that follows it.
-func TestMCTSPrefersLookahead(t *testing.T) {
+// Token 1 followed by token 0 has a higher log-probability sum than any
+// rollout that starts with token 0. The search must return that rollout.
+func TestMCTSPicksHighestSum(t *testing.T) {
 	prompt := []byte{'X'}
 	logitsOf := func(buf []byte) []float32 {
 		if bytes.Equal(buf, prompt) {
@@ -23,10 +24,27 @@ func TestMCTSPrefersLookahead(t *testing.T) {
 		}
 		return []float32{6, -6}
 	}
-	cfg := MCTSConfig{Sims: 24, Width: 2, Horizon: 2, PUCT: 1.5, Temp: 1}
-	got := searchMCTS(prompt, 1, cfg, rand.New(rand.NewSource(1)), logitsOf)
-	if len(got) != 1 || got[0] != 1 {
+	cfg := MCTSConfig{Sims: 32, Temp: 1}
+	got := searchMCTS(prompt, 2, cfg, rand.New(rand.NewSource(1)), logitsOf)
+	if !bytes.Equal(got, []byte{1, 0}) {
 		t.Fatalf("got %v", got)
+	}
+}
+
+func TestRolloutSumIsLogProb(t *testing.T) {
+	prompt := []byte{'X'}
+	logitsOf := func(buf []byte) []float32 {
+		return []float32{0, 0}
+	}
+	// temp 0 is greedy on the first class, whose probability is 1, so the sum is 0.
+	_, sum := sampleRollout(prompt, 3, 0, rand.New(rand.NewSource(1)), logitsOf)
+	if sum != 0 {
+		t.Fatalf("sum %v", sum)
+	}
+	roll, sum := sampleRollout(prompt, 4, 1, rand.New(rand.NewSource(2)), logitsOf)
+	want := float64(len(roll)) * math.Log(0.5)
+	if math.Abs(sum-want) > 1e-9 {
+		t.Fatalf("sum %v want %v", sum, want)
 	}
 }
 
@@ -37,7 +55,7 @@ func TestMCTSDeterministic(t *testing.T) {
 		out[len(buf)%len(out)] += 0.7
 		return out
 	}
-	cfg := MCTSConfig{Sims: 6, Width: 3, Horizon: 3, PUCT: 1.5, Temp: 0.8}
+	cfg := MCTSConfig{Sims: 6, Temp: 0.8}
 	a := searchMCTS(prompt, 5, cfg, rand.New(rand.NewSource(3)), logitsOf)
 	b := searchMCTS(prompt, 5, cfg, rand.New(rand.NewSource(3)), logitsOf)
 	c := searchMCTS(prompt, 5, cfg, rand.New(rand.NewSource(4)), logitsOf)
@@ -66,7 +84,7 @@ func TestGenerateMCTSLength(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mc := MCTSConfig{Sims: 2, Width: 2, Horizon: 2, PUCT: 1.5, Temp: 1}
+	mc := MCTSConfig{Sims: 2, Temp: 1}
 	sample := m.GenerateMCTS([]byte("To be"), 4, mc, rand.New(rand.NewSource(1)))
 	again := m.GenerateMCTS([]byte("To be"), 4, mc, rand.New(rand.NewSource(1)))
 	if len(sample) != 4 || !bytes.Equal(sample, again) {
