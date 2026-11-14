@@ -53,6 +53,8 @@ type TrainConfig struct {
 	SampleN      int
 	SampleTemp   float64
 	Prompt       string
+	MorePath     string
+	MoreN        int
 	Model        Config
 	Log          func(string)
 }
@@ -376,6 +378,30 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	baseTrain := len(train)
+	var moreNames []string
+	var moreBytes int
+	if cfg.MorePath != "" {
+		n := cfg.MoreN
+		if n < 1 {
+			n = moreTextCount
+		}
+		extra, names, err := readFirstTexts(cfg.MorePath, n)
+		if err != nil {
+			return nil, err
+		}
+		moreNames = names
+		moreBytes = len(extra)
+		joined := make([]byte, len(train), len(train)+1+len(extra))
+		copy(joined, train)
+		if len(extra) > 0 {
+			if len(joined) == 0 || joined[len(joined)-1] != '\n' {
+				joined = append(joined, '\n')
+			}
+			joined = append(joined, extra...)
+		}
+		train = joined
+	}
 	if len(train) < cfg.Ctx+1 || len(val) < cfg.Ctx+1 {
 		return nil, fmt.Errorf("split too small for context %d (train %d, val %d)", cfg.Ctx, len(train), len(val))
 	}
@@ -393,7 +419,7 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 		cfg.EvalEvery = max(1, cfg.Steps/10)
 	}
 	if cfg.Model.Vocab < 256 {
-		for _, b := range data {
+		for _, b := range train {
 			if int(b) >= cfg.Model.Vocab {
 				return nil, fmt.Errorf("byte %d does not fit vocab %d", b, cfg.Model.Vocab)
 			}
@@ -424,10 +450,17 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 		cfg.logf("  data: %s", cfg.DataPath)
 	}
 	cfg.logf("  split: train %d bytes (%.4f%%), val %d bytes (%.4f%%), contiguous suffix holdout",
-		len(train), 100*float64(len(train))/float64(len(data)),
+		baseTrain, 100*float64(baseTrain)/float64(len(data)),
 		len(val), 100*float64(len(val))/float64(len(data)))
-	cut := len(train)
+	cut := baseTrain
 	cfg.logf("  boundary around byte %d: %s", cut, boundaryPreview(data, cut))
+	if len(moreNames) > 0 {
+		cfg.logf("  more: %d bytes from %d texts in %s, training bytes now %d",
+			moreBytes, len(moreNames), cfg.MorePath, len(train))
+		for _, name := range moreNames {
+			cfg.logf("    %s", name)
+		}
+	}
 	if full {
 		cfg.logf("  pass: %d training windows, stride %d, %d steps; validation uses every holdout window",
 			len(trainStarts), cfg.Ctx, cfg.Steps)
@@ -442,7 +475,7 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 	}
 	res := &TrainResult{
 		Params:     nParam,
-		TotalBytes: len(data),
+		TotalBytes: len(train) + len(val),
 		TrainBytes: len(train),
 		ValBytes:   len(val),
 		Steps:      cfg.Steps,
@@ -634,6 +667,7 @@ func trainFromArgs(args []string) error {
 		fs.PrintDefaults()
 	}
 	data := fs.String("data", "100.txt.utf-8", "UTF-8 text file")
+	more := fs.Bool("more", false, "append the first 10 texts in txt-files.tar.zip to the training split")
 	steps := fs.Int("steps", 0, "optimizer steps; 0 is one pass over the training split")
 	batch := fs.Int("batch", 16, "batch size")
 	ctx := fs.Int("ctx", 64, "context length")
@@ -683,6 +717,12 @@ func trainFromArgs(args []string) error {
 		defer f.Close()
 		logFile = f
 	}
+	morePath := ""
+	moreN := 0
+	if *more {
+		morePath = "txt-files.tar.zip"
+		moreN = moreTextCount
+	}
 	_, err := Train(TrainConfig{
 		DataPath:  *data,
 		Steps:     *steps,
@@ -695,6 +735,8 @@ func trainFromArgs(args []string) error {
 		Seed:      *seed,
 		OutDir:    *out,
 		SampleN:   *sampleN,
+		MorePath:  morePath,
+		MoreN:     moreN,
 		Model:     cfg,
 		Log:       logFn,
 	})

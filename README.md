@@ -43,6 +43,8 @@ go run . train -h
 
 With no `-steps` value, training walks that 90% once. Windows start every 64 bytes, and one last window covers the tail. Validation scores every window in the remaining 10%. Batch size is 16, the learning rate is `3e-4`, and warmup is 100 steps. `-steps 1000` instead draws that many random training windows and validates on a sample of the holdout.
 
+`-more` appends the first 10 texts in `txt-files.tar.zip` to the training split. The validation suffix of `100.txt.utf-8` stays as it is.
+
 An earlier random run, `go run . train -steps 6000 -eval-every 200 -warmup 200` with seed 42, reached validation next-byte cross-entropy 1.82 nats (perplexity 6.19), down from 5.53 (perplexity 253) at initialization.
 
 Checkpoints go to `checkpoints/` (`best.gob`, `result.json`, `train.log`). That directory is gitignored. Pass `-out ""` to skip writing it, and `-sample 0` to skip the generated continuation.
