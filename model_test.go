@@ -411,6 +411,67 @@ func TestOraclePathReceivesGrad(t *testing.T) {
 	}
 }
 
+func TestWindowStartsCoverTargets(t *testing.T) {
+	const n, ctx = 1000, 64
+	starts := windowStarts(n, ctx)
+	if len(starts) == 0 {
+		t.Fatal("no windows")
+	}
+	seen := make([]bool, n)
+	for _, s := range starts {
+		if s < 0 || s+ctx >= n {
+			t.Fatalf("start %d", s)
+		}
+		for k := 1; k <= ctx; k++ {
+			seen[s+k] = true
+		}
+	}
+	for i := 1; i < n; i++ {
+		if !seen[i] {
+			t.Fatalf("byte %d is not a target", i)
+		}
+	}
+}
+
+func TestTrainFullPass(t *testing.T) {
+	raw := bytes.Repeat([]byte("abcdefg"), 40)
+	cfg := defaultConfig()
+	cfg.Ctx = 8
+	cfg.DModel = 16
+	cfg.Layers = 1
+	cfg.Heads = 4
+	cfg.OracleInput = 4
+	cfg.MaxSteps = 8
+	res, err := Train(TrainConfig{
+		Data:      raw,
+		Steps:     0,
+		Batch:     4,
+		Ctx:       cfg.Ctx,
+		LR:        1e-3,
+		Warmup:    0,
+		EvalEvery: 1000,
+		Seed:      1,
+		SampleN:   0,
+		Model:     cfg,
+		Log:       func(string) {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trainN := (len(raw) * 9) / 10
+	starts := windowStarts(trainN, cfg.Ctx)
+	want := (len(starts) + 3) / 4
+	if res.Steps != want {
+		t.Fatalf("steps %d want %d (%d windows)", res.Steps, want, len(starts))
+	}
+	if res.TrainBytes != trainN || res.TrainBytes+res.ValBytes != len(raw) {
+		t.Fatalf("split train %d val %d total %d", res.TrainBytes, res.ValBytes, len(raw))
+	}
+	if math.IsNaN(res.ValCE) || res.ValPPL <= 1 {
+		t.Fatalf("val %+v", res)
+	}
+}
+
 func TestSplit90(t *testing.T) {
 	data := make([]byte, 1000)
 	for i := range data {

@@ -179,6 +179,34 @@ func fillBatch(data []byte, x, y []int, B, T int, rng *rand.Rand) {
 	}
 }
 
+// windowStarts lists context windows that together predict every byte after
+// the first. Windows begin every T bytes, and the last window is aligned to
+// the end of the slice when the length is not a multiple of T.
+func windowStarts(n, T int) []int {
+	if T < 1 || n < T+1 {
+		return nil
+	}
+	last := n - T - 1
+	starts := make([]int, 0, last/T+2)
+	for s := 0; s <= last; s += T {
+		starts = append(starts, s)
+	}
+	if starts[len(starts)-1] != last {
+		starts = append(starts, last)
+	}
+	return starts
+}
+
+func fillWindows(data []byte, x, y []int, starts []int, T int) {
+	for b, start := range starts {
+		base := b * T
+		for t := 0; t < T; t++ {
+			x[base+t] = int(data[start+t])
+			y[base+t] = int(data[start+t+1])
+		}
+	}
+}
+
 func (cfg TrainConfig) logf(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	if cfg.Log != nil {
@@ -244,6 +272,44 @@ func evalCE(m *OracleTransformer, data []byte, batch, ctx, batches int, seed int
 	return sum / float64(batches), halt / float64(batches), nil
 }
 
+// evalAll is the mean next-byte loss on every window in data.
+func evalAll(m *OracleTransformer, data []byte, batch, ctx int) (float64, float64, error) {
+	starts := windowStarts(len(data), ctx)
+	if len(starts) == 0 {
+		return 0, 0, fmt.Errorf("no validation windows")
+	}
+	if batch < 1 {
+		return 0, 0, fmt.Errorf("eval batches")
+	}
+	x := make([]int, batch*ctx)
+	y := make([]int, batch*ctx)
+	was := autogradEnabled
+	autogradEnabled = false
+	defer func() { autogradEnabled = was }()
+	var sum float64
+	var n int
+	var haltSum float64
+	var haltN int
+	for i := 0; i < len(starts); i += batch {
+		j := i + batch
+		if j > len(starts) {
+			j = len(starts)
+		}
+		b := j - i
+		fillWindows(data, x[:b*ctx], y[:b*ctx], starts[i:j], ctx)
+		_, ce, _, h := m.Loss(x[:b*ctx], y[:b*ctx], b, ctx)
+		v := float64(ce.Data[0])
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return 0, 0, fmt.Errorf("non-finite eval loss")
+		}
+		sum += v * float64(b)
+		n += b
+		haltSum += h
+		haltN++
+	}
+	return sum / float64(n), haltSum / float64(haltN), nil
+}
+
 func oracleWeightNorms(m *OracleTransformer) (answer, bit float64) {
 	var as, bs float64
 	n := float64(len(m.Blocks))
@@ -260,8 +326,8 @@ func oracleWeightNorms(m *OracleTransformer) (answer, bit float64) {
 // Train fits an OracleTransformer. The file is split once: the first 90% of
 // bytes are training windows and the last 10% are validation windows.
 func Train(cfg TrainConfig) (*TrainResult, error) {
-	if cfg.Steps < 1 {
-		return nil, fmt.Errorf("steps must be positive")
+	if cfg.Steps < 0 {
+		return nil, fmt.Errorf("steps must be non-negative")
 	}
 	if cfg.Batch < 1 {
 		return nil, fmt.Errorf("batch must be positive")
@@ -280,9 +346,6 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 	}
 	if cfg.LR == 0 {
 		cfg.LR = 3e-4
-	}
-	if cfg.EvalEvery <= 0 {
-		cfg.EvalEvery = 100
 	}
 	if cfg.SelBatches <= 0 {
 		cfg.SelBatches = 20
@@ -315,6 +378,19 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 	}
 	if len(train) < cfg.Ctx+1 || len(val) < cfg.Ctx+1 {
 		return nil, fmt.Errorf("split too small for context %d (train %d, val %d)", cfg.Ctx, len(train), len(val))
+	}
+	// Steps == 0 is one pass over every training window. Validation then
+	// scores every window in the holdout instead of a random subset.
+	trainStarts := windowStarts(len(train), cfg.Ctx)
+	full := cfg.Steps == 0
+	if full {
+		if len(trainStarts) == 0 {
+			return nil, fmt.Errorf("no training windows")
+		}
+		cfg.Steps = (len(trainStarts) + cfg.Batch - 1) / cfg.Batch
+	}
+	if cfg.EvalEvery <= 0 {
+		cfg.EvalEvery = max(1, cfg.Steps/10)
 	}
 	if cfg.Model.Vocab < 256 {
 		for _, b := range data {
@@ -352,17 +428,25 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 		len(val), 100*float64(len(val))/float64(len(data)))
 	cut := len(train)
 	cfg.logf("  boundary around byte %d: %s", cut, boundaryPreview(data, cut))
+	if full {
+		cfg.logf("  pass: %d training windows, stride %d, %d steps; validation uses every holdout window",
+			len(trainStarts), cfg.Ctx, cfg.Steps)
+	}
 
 	x := make([]int, cfg.Batch*cfg.Ctx)
 	y := make([]int, cfg.Batch*cfg.Ctx)
 
+	tokens := cfg.Steps * cfg.Batch * cfg.Ctx
+	if full {
+		tokens = len(trainStarts) * cfg.Ctx
+	}
 	res := &TrainResult{
 		Params:     nParam,
 		TotalBytes: len(data),
 		TrainBytes: len(train),
 		ValBytes:   len(val),
 		Steps:      cfg.Steps,
-		Tokens:     cfg.Steps * cfg.Batch * cfg.Ctx,
+		Tokens:     tokens,
 		Prompt:     cfg.Prompt,
 	}
 
@@ -371,7 +455,13 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 	bestStep := 0
 
 	logEval := func(step int, trainCE float64) error {
-		ce, halt, err := evalCE(model, val, cfg.Batch, cfg.Ctx, cfg.SelBatches, 1234567)
+		var ce, halt float64
+		var err error
+		if full {
+			ce, halt, err = evalAll(model, val, cfg.Batch, cfg.Ctx)
+		} else {
+			ce, halt, err = evalCE(model, val, cfg.Batch, cfg.Ctx, cfg.SelBatches, 1234567)
+		}
 		if err != nil {
 			return err
 		}
@@ -400,9 +490,20 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 	var lastAvg float64
 	stepTime := time.Now()
 	for step := 0; step < cfg.Steps; step++ {
-		fillBatch(train, x, y, cfg.Batch, cfg.Ctx, dataRng)
+		b := cfg.Batch
+		if full {
+			b0 := step * cfg.Batch
+			b1 := b0 + cfg.Batch
+			if b1 > len(trainStarts) {
+				b1 = len(trainStarts)
+			}
+			b = b1 - b0
+			fillWindows(train, x[:b*cfg.Ctx], y[:b*cfg.Ctx], trainStarts[b0:b1], cfg.Ctx)
+		} else {
+			fillBatch(train, x, y, b, cfg.Ctx, dataRng)
+		}
 		autogradEnabled = true
-		total, ce, aux, halt := model.Loss(x, y, cfg.Batch, cfg.Ctx)
+		total, ce, aux, halt := model.Loss(x[:b*cfg.Ctx], y[:b*cfg.Ctx], b, cfg.Ctx)
 		cev := float64(ce.Data[0])
 		if math.IsNaN(cev) || math.IsInf(cev, 0) || math.IsNaN(float64(total.Data[0])) {
 			return nil, fmt.Errorf("non-finite loss at step %d", step+1)
@@ -443,7 +544,12 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 		return nil, fmt.Errorf("no validation checkpoint")
 	}
 	restoreParams(ps, bestSnap)
-	valCE, valHalt, err := evalCE(model, val, cfg.Batch, cfg.Ctx, cfg.FinalBatches, 7654321)
+	var valCE, valHalt float64
+	if full {
+		valCE, valHalt, err = evalAll(model, val, cfg.Batch, cfg.Ctx)
+	} else {
+		valCE, valHalt, err = evalCE(model, val, cfg.Batch, cfg.Ctx, cfg.FinalBatches, 7654321)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -471,8 +577,13 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 		}
 	}
 
-	cfg.logf("best selection step %d  val_ce %.4f  val_ppl %.2f (larger holdout, seed 7654321)",
-		bestStep, res.ValCE, res.ValPPL)
+	if full {
+		cfg.logf("best selection step %d  val_ce %.4f  val_ppl %.2f (full validation split)",
+			bestStep, res.ValCE, res.ValPPL)
+	} else {
+		cfg.logf("best selection step %d  val_ce %.4f  val_ppl %.2f (larger holdout, seed 7654321)",
+			bestStep, res.ValCE, res.ValPPL)
+	}
 	cfg.logf("oracle answer L2 %.4f  bit-projection L2 %.4f  halt rate %.3f", ans, bit, valHalt)
 	cfg.logf("example query layer0 machine=%s tape=%s halts=%v", res.ExampleMachine, res.ExampleTape, res.ExampleHalts)
 	if cfg.SampleN > 0 {
@@ -519,11 +630,11 @@ func boundaryPreview(data []byte, cut int) string {
 func trainFromArgs(args []string) error {
 	fs := flag.NewFlagSet("train", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: oracle train [flags]\n\nTrain a byte-level transformer with a halting-oracle sublayer.\nThe text file is split 90%% train / 10%% validation by byte offset.\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: oracle train [flags]\n\nTrain a byte-level transformer with a halting-oracle sublayer.\nThe text file is split 90%% train / 10%% validation by byte offset.\nThe default run walks every training window once and scores every validation window.\n\n")
 		fs.PrintDefaults()
 	}
 	data := fs.String("data", "100.txt.utf-8", "UTF-8 text file")
-	steps := fs.Int("steps", 1000, "optimizer steps")
+	steps := fs.Int("steps", 0, "optimizer steps; 0 is one pass over the training split")
 	batch := fs.Int("batch", 16, "batch size")
 	ctx := fs.Int("ctx", 64, "context length")
 	dmodel := fs.Int("d", 64, "model dimension")
@@ -532,7 +643,7 @@ func trainFromArgs(args []string) error {
 	lr := fs.Float64("lr", 3e-4, "peak learning rate")
 	wd := fs.Float64("wd", 0.01, "AdamW weight decay on matrices")
 	warmup := fs.Int("warmup", 100, "linear warmup steps")
-	evalEvery := fs.Int("eval-every", 50, "validation interval in steps")
+	evalEvery := fs.Int("eval-every", 0, "validation interval in steps; 0 is about 10 times per run")
 	oracleSteps := fs.Int("oracle-steps", defaultOracleSteps, "bounded oracle step limit")
 	oracleStates := fs.Int("oracle-states", defaultOracleStates, "states in each queried machine")
 	oracleInput := fs.Int("oracle-input", defaultOracleInput, "tape length of each query")
