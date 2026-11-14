@@ -425,6 +425,32 @@ func (m *OracleTransformer) Loss(toks, tgt []int, B, T int) (total, ce, aux *Ten
 	return total, ce, aux, halt
 }
 
+// nextLogits is the next-byte distribution at the end of buf.
+// The returned slice is a copy. An empty buffer is scored as a single newline.
+func (m *OracleTransformer) nextLogits(buf []byte) []float32 {
+	if len(buf) == 0 {
+		buf = []byte{'\n'}
+	}
+	T := len(buf)
+	if T > m.Cfg.Ctx {
+		T = m.Cfg.Ctx
+	}
+	window := buf[len(buf)-T:]
+	toks := make([]int, T)
+	for j := 0; j < T; j++ {
+		id := int(window[j])
+		if id >= m.Cfg.Vocab {
+			id = id % m.Cfg.Vocab
+		}
+		toks[j] = id
+	}
+	logits, _, _ := m.Logits(toks, 1, T)
+	last := logits.Data[(T-1)*m.Cfg.Vocab : T*m.Cfg.Vocab]
+	out := make([]float32, len(last))
+	copy(out, last)
+	return out
+}
+
 // Generate continues prompt by n bytes.
 // Each byte is one draw from softmax(logits / temperature).
 // Temperature <= 0 picks the mode instead of sampling.
@@ -437,22 +463,7 @@ func (m *OracleTransformer) Generate(prompt []byte, n int, temp float64, rng *ra
 	autogradEnabled = false
 	defer func() { autogradEnabled = was }()
 	for i := 0; i < n; i++ {
-		T := len(buf)
-		if T > m.Cfg.Ctx {
-			T = m.Cfg.Ctx
-		}
-		window := buf[len(buf)-T:]
-		toks := make([]int, T)
-		for j := 0; j < T; j++ {
-			id := int(window[j])
-			if id >= m.Cfg.Vocab {
-				id = id % m.Cfg.Vocab
-			}
-			toks[j] = id
-		}
-		logits, _, _ := m.Logits(toks, 1, T)
-		last := logits.Data[(T-1)*m.Cfg.Vocab : T*m.Cfg.Vocab]
-		next := sampleLogits(last, temp, rng)
+		next := sampleLogits(m.nextLogits(buf), temp, rng)
 		buf = append(buf, byte(next))
 	}
 	return buf[len(prompt):]
