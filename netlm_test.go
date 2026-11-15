@@ -34,48 +34,44 @@ func TestHaltAtMatchesHalts(t *testing.T) {
 	}
 }
 
-func TestEarliestSymbolFollowsTheHighBit(t *testing.T) {
-	// Byte 0 wins when the previous byte's high bit is 1.
-	// Byte 128 wins when that bit is 0.
-	spec := symbolSpec{Alphabet: []byte{0, 128}, States: 1, MaxSteps: 8}
+func TestSurvivingSymbolFollowsTheHighBit(t *testing.T) {
+	// Byte 255 is still running after a zero byte. Byte 0 is still running
+	// after 255. The other machine halts, so the survivor is the next byte.
+	spec := symbolSpec{Alphabet: []byte{0, 255}, States: 1, MaxSteps: 8}
 	g := []int{
-		0, 1, 1, // byte 0, read 0: keep going
-		1, 1, 0, // byte 0, read 1: halt
-		0, 1, 0, // byte 128, read 0: halt
-		1, 1, 1, // byte 128, read 1: keep going
+		0, 1, 0, // byte 0, read 0: halt
+		1, 1, 1, // byte 0, read 1: walk right across the remaining ones
+		0, 1, 1, // byte 255, read 0: walk right across zeros
+		1, 1, 0, // byte 255, read 1: halt
 	}
 	machines := decodeSymbols(g, spec)
 	sim := &UniversalBoundedSimulator{MaxSteps: spec.MaxSteps}
-	if sym, ok := earliestSymbol(sim, machines, spec.Alphabet, 0); !ok || sym != 128 {
+	if sym, ok := survivingSymbol(sim, machines, spec.Alphabet, 0); !ok || sym != 255 {
 		t.Fatalf("after 0 got %d ok %v", sym, ok)
 	}
-	if sym, ok := earliestSymbol(sim, machines, spec.Alphabet, 128); !ok || sym != 0 {
-		t.Fatalf("after 128 got %d ok %v", sym, ok)
+	if sym, ok := survivingSymbol(sim, machines, spec.Alphabet, 255); !ok || sym != 0 {
+		t.Fatalf("after 255 got %d ok %v", sym, ok)
 	}
-	data := bytes.Repeat([]byte{0, 128}, 16)
+	data := bytes.Repeat([]byte{0, 255}, 16)
 	acc, _, _, missed := symbolDetail(sim, machines, spec.Alphabet, data)
 	if acc != 1 || missed != 0 {
 		t.Fatalf("acc %.3f missed %d", acc, missed)
 	}
 	got := continueSymbols(sim, machines, spec.Alphabet, []byte{0}, 4, 0)
-	if !bytes.Equal(got, []byte{128, 0, 128, 0}) {
+	if !bytes.Equal(got, []byte{255, 0, 255, 0}) {
 		t.Fatalf("sample %v", got)
 	}
 }
 
 func TestSymbolSearchLearnsHighBit(t *testing.T) {
-	data := bytes.Repeat([]byte{0, 128}, 30)
+	data := bytes.Repeat([]byte{0, 255}, 30)
 	res, err := NetLM(NetLMConfig{
 		Data:     data,
-		Pop:      24,
-		Gens:     20,
 		States:   1,
 		MaxSteps: 8,
 		Bytes:    len(data),
 		ValBytes: len(data),
-		MutRate:  0.2,
 		GenBytes: 0,
-		Seed:     1,
 		OutDir:   "",
 	})
 	if err != nil {
@@ -87,16 +83,60 @@ func TestSymbolSearchLearnsHighBit(t *testing.T) {
 	if res.FitAcc < 0.9 {
 		t.Fatalf("fit %.3f unigram %.3f bigram %.3f", res.FitAcc, res.FitUnigram, res.FitBigram)
 	}
+	spec := symbolSpec{Alphabet: collectAlphabet(data), States: res.States, MaxSteps: 8}
+	machines := decodeSymbols(res.Genome, spec)
+	if len(machines) != 2 || machines[0] == machines[1] {
+		t.Fatal("symbols need two different machines")
+	}
+	sim := &UniversalBoundedSimulator{MaxSteps: 8}
+	acc, _, _, _ := symbolDetail(sim, machines, spec.Alphabet, data)
+	if acc != res.FitAcc {
+		t.Fatalf("reported %.3f simulator %.3f", res.FitAcc, acc)
+	}
 }
 
 func TestSymbolOracleRejects(t *testing.T) {
 	if err := (symbolSpec{States: 1, MaxSteps: 8}).validate(); err == nil {
 		t.Fatal("expected an empty alphabet to be rejected")
 	}
-	_, err := NetLM(NetLMConfig{Data: []byte{1, 2, 3}, Pop: 1, Bytes: 3})
+	_, err := NetLM(NetLMConfig{Data: []byte{1, 2, 3}, States: 3, Bytes: 3})
 	if err == nil {
-		t.Fatal("expected a population of 1 to be rejected")
+		t.Fatal("expected 3 states to be rejected")
 	}
+}
+
+func TestFastSimMatchesHaltAt(t *testing.T) {
+	if machineCount(1) != 64 || machineCount(2) != 20736 {
+		t.Fatalf("program counts %d %d", machineCount(1), machineCount(2))
+	}
+	check := func(states, maxSteps int, ids []int, tapes []byte) {
+		t.Helper()
+		sim := &UniversalBoundedSimulator{MaxSteps: maxSteps}
+		for _, id := range ids {
+			m := machineFromGenes(genesFromIndex(id, states), states)
+			for _, b := range tapes {
+				tape := byteTape(b)
+				got := survivesID(states, id, maxSteps, tape)
+				want := sim.HaltAt(m, tape) < 0
+				if got != want {
+					t.Fatalf("states %d steps %d id %d tape %d sim %v haltat %v", states, maxSteps, id, b, got, want)
+				}
+			}
+		}
+	}
+	tapes := []byte{0, 1, 0x20, 255}
+	ids1 := make([]int, machineCount(1))
+	for i := range ids1 {
+		ids1[i] = i
+	}
+	check(1, 8, ids1, tapes)
+	check(1, 16, ids1, tapes)
+	n2 := machineCount(2)
+	ids2 := []int{0, 1, n2 - 1}
+	for id := 0; id < n2; id += 64 {
+		ids2 = append(ids2, id)
+	}
+	check(2, 16, ids2, tapes)
 }
 
 func TestNetLMHelp(t *testing.T) {
