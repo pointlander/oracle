@@ -89,13 +89,34 @@ go run . evolve
 go run . evolve -h
 ```
 
+## Oracle network
+
+`net` builds random networks of step-bounded total machines. Each machine reads a tape whose cells are the halt bits of other machines in the same network. A self-loop is allowed, and the same source can be drawn more than once. A halt is the character `1`. Every node has the same in-degree.
+
+`Halts` stops at `-oracle-steps` and reports a machine that is still running as non-halting. The network is that approximation. It is not a decider for the halting problem.
+
+The report has three parts.
+
+Isolated machines. Every tape of length `-degree` is run. The report gives the fraction of machines whose transition on `0` is a halt, the halt rate on the all-zero tape, the halt rate over a uniform tape, and the fraction of machines whose answer depends on the tape. It also gives two per-cell scores. Influence is the mean absolute change in the halt rate when that cell flips. The effect of a 1 is the signed change, positive when a 1 makes the machine more likely to halt. Cell 0 is the symbol under the head at the start.
+
+A feedforward stack. Every node starts non-halting. Each layer replaces the halt vector by one simultaneous round of queries. Echo is the fraction of nodes whose bit still differs after one input bit is flipped, averaged over which bit was flipped.
+
+A recurrent iteration of the same map, once from the zero vector and once from a random vector. A repeated vector within `-iters` steps is a cycle. Length 1 is a fixed point. The mean cycle length and the halt rate are averages over the runs that closed.
+
+```bash
+go run . net
+go run . net -h
+```
+
+The defaults are 32 nodes, in-degree 4, a 64-step simulator bound, 8 layers, 40 networks, 64 recurrent steps, and 2048 isolated machines, with seed 1. Those settings run once for 1-state machines and once for 2-state machines.
+
 ## Tests
 
 ```bash
 go test
 ```
 
-The tests check the simulator, the machine encoding, gradients of the autograd ops, that a tiny model can reduce loss on a repeated string, that the oracle-off control and the halt-label task run, and that the Huffman code round-trips and the genetic search raises next-bit accuracy.
+The tests check the simulator, the machine encoding, gradients of the autograd ops, that a tiny model can reduce loss on a repeated string, that the oracle-off control and the halt-label task run, that the Huffman code round-trips and the genetic search raises next-bit accuracy, and that a network passes halt bits along its tapes and sits at a fixed point when every machine ignores its tape.
 
 ## License
 

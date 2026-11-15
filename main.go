@@ -230,6 +230,8 @@ func main() {
 			err = inferFromArgs(os.Args[2:])
 		case "evolve", "-evolve":
 			err = evolveFromArgs(os.Args[2:])
+		case "net", "-net":
+			err = netFromArgs(os.Args[2:])
 		default:
 			demo()
 			return
