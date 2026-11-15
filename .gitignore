@@ -3,6 +3,7 @@
 *.exe
 *.test
 *.out
+txt-files.tar.zip
 
 # training artifacts
-/checkpoints/
+/checkpoints*/
