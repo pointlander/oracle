@@ -50,9 +50,17 @@ type UniversalBoundedSimulator struct {
 }
 
 func (utm *UniversalBoundedSimulator) Halts(m string, w string) bool {
+	return utm.HaltAt(m, w) >= 0
+}
+
+// HaltAt reports the step at which the machine is observed halted.
+// Malformed encodings halt at step 0. A machine still running at MaxSteps
+// returns -1. State 0 is checked at the start of a step, so a transition
+// into state 0 is observed on the following step.
+func (utm *UniversalBoundedSimulator) HaltAt(m string, w string) int {
 	// Validate that `m` consists of complete 16-bit state blocks
 	if len(m) == 0 || len(m)%16 != 0 {
-		return true // Malformed machines halt immediately
+		return 0 // Malformed machines halt immediately
 	}
 
 	numStates := len(m) / 16
@@ -64,7 +72,7 @@ func (utm *UniversalBoundedSimulator) Halts(m string, w string) bool {
 		t0, ok0 := decodeTransition(m[offset : offset+8])
 		t1, ok1 := decodeTransition(m[offset+8 : offset+16])
 		if !ok0 || !ok1 {
-			return true
+			return 0
 		}
 		table[s] = [2]Transition{t0, t1}
 	}
@@ -80,13 +88,13 @@ func (utm *UniversalBoundedSimulator) Halts(m string, w string) bool {
 
 	for step := 0; step < utm.MaxSteps; step++ {
 		if state == 0 {
-			return true // Machine halted!
+			return step
 		}
 
 		// Jump to an undefined state triggers an immediate halt
 		transitions, exists := table[state]
 		if !exists {
-			return true
+			return step
 		}
 
 		currentVal, cellExists := tape[head]
@@ -107,7 +115,7 @@ func (utm *UniversalBoundedSimulator) Halts(m string, w string) bool {
 	}
 
 	// Exceeded MaxSteps: approximated as non-halting (infinite loop)
-	return false
+	return -1
 }
 
 func decodeTransition(bits string) (Transition, bool) {
@@ -232,6 +240,8 @@ func main() {
 			err = evolveFromArgs(os.Args[2:])
 		case "net", "-net":
 			err = netFromArgs(os.Args[2:])
+		case "netlm", "-netlm":
+			err = netLMFromArgs(os.Args[2:])
 		default:
 			demo()
 			return
