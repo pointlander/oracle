@@ -228,6 +228,8 @@ func main() {
 			err = trainFromArgs(os.Args[2:])
 		case "infer", "generate", "-infer":
 			err = inferFromArgs(os.Args[2:])
+		case "evolve", "-evolve":
+			err = evolveFromArgs(os.Args[2:])
 		default:
 			demo()
 			return

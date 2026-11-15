@@ -76,13 +76,26 @@ The default checkpoint is `checkpoints/best.gob`. A negative `-seed` (the defaul
 go run . infer -mcts -sims 8 -prompt "To be, or not to be" -temp 0.8 -n 80
 ```
 
+## Recurrent bit model
+
+`evolve` Huffman-codes `100.txt.utf-8` and trains a recurrent next-bit predictor by genetic search. The code is built from the first 90% of the bytes. Those bits are the training stream. The last 10% are encoded with the same code and scored after the search.
+
+Each step feeds two bits into a one-hidden-layer net. One bit is the current Huffman bit. The other is the halt bit from the previous step, starting at 0. The net writes a total binary machine and a tape: a write bit, a move bit, and a next state in `0..states` for each transition. `Halts` on that query is the prediction of the next code bit, and that bit is fed back. The rollout is closed-loop, so the true bit is not substituted for the feedback. There are four possible inputs, so each genome calls the oracle four times and then walks the bitstream from that table.
+
+Fitness is the fraction of next bits predicted correctly. The search keeps the best genome each generation, crosses pairs chosen by tournament, and adds gaussian noise to genes. `-bits N` scores only the first N training bits. The default scores the whole training stream. The result also prints the majority-bit baseline, the accuracy of always predicting the more common bit.
+
+```bash
+go run . evolve
+go run . evolve -h
+```
+
 ## Tests
 
 ```bash
 go test
 ```
 
-The tests check the simulator, the machine encoding, gradients of the autograd ops, that a tiny model can reduce loss on a repeated string, and that the oracle-off control and the halt-label task run.
+The tests check the simulator, the machine encoding, gradients of the autograd ops, that a tiny model can reduce loss on a repeated string, that the oracle-off control and the halt-label task run, and that the Huffman code round-trips and the genetic search raises next-bit accuracy.
 
 ## License
 
