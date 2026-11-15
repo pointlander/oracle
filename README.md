@@ -45,6 +45,16 @@ With no `-steps` value, training walks that 90% once. Windows start every 64 byt
 
 `-more` appends the first 10 texts in `txt-files.tar.zip` to the training split. The validation suffix of `100.txt.utf-8` stays as it is.
 
+`-oracle=false` trains the same width, data, and step count with the oracle sublayer removed. Initialization still draws the oracle weights, then drops them, so the remaining weights match an oracle model from the same seed. `-compare` trains both and writes `checkpoints/oracle`, `checkpoints/no-oracle`, and `checkpoints/compare.json`. That doubles the run.
+
+`-task halt` trains a halt head on `M#W` strings labeled by `Halts`. Half the strings halt inside the step bound and half do not. Next states are drawn from `0..states`, the same choices the oracle layer can emit. The first 90% of the strings are training examples and the last 10% are validation. The report is validation binary cross-entropy and accuracy, written to the same checkpoint directory. `-halt-n` is the number of strings (default 2048). `-more` and `-compare` apply to the language-model task.
+
+```bash
+go run . train -oracle=false
+go run . train -compare -steps 1000
+go run . train -task halt
+```
+
 An earlier random run, `go run . train -steps 6000 -eval-every 200 -warmup 200` with seed 42, reached validation next-byte cross-entropy 1.82 nats (perplexity 6.19), down from 5.53 (perplexity 253) at initialization.
 
 Checkpoints go to `checkpoints/` (`best.gob`, `result.json`, `train.log`). That directory is gitignored. Pass `-out ""` to skip writing it, and `-sample 0` to skip the generated continuation.
@@ -72,7 +82,7 @@ go run . infer -mcts -sims 8 -prompt "To be, or not to be" -temp 0.8 -n 80
 go test
 ```
 
-The tests check the simulator, the machine encoding, gradients of the autograd ops, and that a tiny model can reduce loss on a repeated string.
+The tests check the simulator, the machine encoding, gradients of the autograd ops, that a tiny model can reduce loss on a repeated string, and that the oracle-off control and the halt-label task run.
 
 ## License
 

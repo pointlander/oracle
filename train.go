@@ -55,6 +55,7 @@ type TrainConfig struct {
 	Prompt       string
 	MorePath     string
 	MoreN        int
+	HaltN        int // M#W examples for the halt task; 0 uses 2048
 	Model        Config
 	Log          func(string)
 }
@@ -83,6 +84,11 @@ type TrainResult struct {
 	ExampleHalts   bool    `json:"example_halts"`
 	Sample         string  `json:"sample"`
 	Prompt         string  `json:"prompt"`
+	// Task is "lm" or "halt". ValAcc is set for the halt task.
+	// Oracle is false when the run is the no-oracle control.
+	Task   string  `json:"task,omitempty"`
+	ValAcc float64 `json:"val_acc,omitempty"`
+	Oracle bool    `json:"oracle"`
 }
 
 type adamW struct {
@@ -241,6 +247,9 @@ func restoreParams(ps []*Tensor, snap [][]float32) {
 }
 
 func saveCheckpoint(path string, cfg Config, ps []*Tensor, step int, val float64) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	ck := checkpoint{Config: cfg, Step: step, ValCE: val, Params: snapshotParams(ps)}
 	f, err := os.Create(path)
 	if err != nil {
@@ -248,6 +257,22 @@ func saveCheckpoint(path string, cfg Config, ps []*Tensor, step int, val float64
 	}
 	defer f.Close()
 	return gob.NewEncoder(f).Encode(&ck)
+}
+
+func outJoin(dir, name string) string {
+	return filepath.Join(dir, name)
+}
+
+func writeResult(path string, v any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	buf, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	buf = append(buf, '\n')
+	return os.WriteFile(path, buf, 0o644)
 }
 
 func evalCE(m *OracleTransformer, data []byte, batch, ctx, batches int, seed int64) (float64, float64, error) {
@@ -314,15 +339,19 @@ func evalAll(m *OracleTransformer, data []byte, batch, ctx int) (float64, float6
 
 func oracleWeightNorms(m *OracleTransformer) (answer, bit float64) {
 	var as, bs float64
-	n := float64(len(m.Blocks))
+	n := 0
 	for _, b := range m.Blocks {
+		if b.Ora == nil {
+			continue
+		}
 		as += l2Data(b.Ora.Answer)
 		bs += l2Data(b.Ora.BitW)
+		n++
 	}
 	if n == 0 {
 		return 0, 0
 	}
-	return as / n, bs / n
+	return as / float64(n), bs / float64(n)
 }
 
 // Train fits an OracleTransformer. The file is split once: the first 90% of
@@ -438,13 +467,17 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 		nParam += len(p.Data)
 	}
 	opt := newAdamW(ps, cfg.WD)
-	feat := model.Blocks[0].Ora.Feat
+	oracleOn := model.Blocks[0].Ora != nil
 
 	cfg.logf("oracle transformer")
 	cfg.logf("  byte-level decoder, %d layers, d=%d, heads=%d, ctx=%d, vocab=%d",
 		cfg.Model.Layers, cfg.Model.DModel, cfg.Model.Heads, cfg.Model.Ctx, cfg.Model.Vocab)
-	cfg.logf("  halting oracle: %d-state total binary machines, %d-bit tapes, %d-step bound, %d query features",
-		cfg.Model.OracleStates, cfg.Model.OracleInput, cfg.Model.MaxSteps, feat)
+	if oracleOn {
+		cfg.logf("  halting oracle: %d-state total binary machines, %d-bit tapes, %d-step bound, %d query features",
+			cfg.Model.OracleStates, cfg.Model.OracleInput, cfg.Model.MaxSteps, model.Blocks[0].Ora.Feat)
+	} else {
+		cfg.logf("  halting oracle: off")
+	}
 	cfg.logf("  params: %d", nParam)
 	if cfg.DataPath != "" {
 		cfg.logf("  data: %s", cfg.DataPath)
@@ -481,6 +514,8 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 		Steps:      cfg.Steps,
 		Tokens:     tokens,
 		Prompt:     cfg.Prompt,
+		Task:       "lm",
+		Oracle:     oracleOn,
 	}
 
 	bestVal := math.Inf(1)
@@ -595,10 +630,11 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 	res.HaltRate = valHalt
 	res.OracleAnswerL2 = ans
 	res.OracleBitL2 = bit
-	blk0 := model.Blocks[0].Ora
-	res.ExampleMachine = blk0.LastM
-	res.ExampleTape = blk0.LastW
-	res.ExampleHalts = blk0.LastHalt
+	if ora := model.Blocks[0].Ora; ora != nil {
+		res.ExampleMachine = ora.LastM
+		res.ExampleTape = ora.LastW
+		res.ExampleHalts = ora.LastHalt
+	}
 
 	if cfg.SampleN > 0 {
 		genRng := rand.New(rand.NewSource(cfg.Seed + 99))
@@ -618,7 +654,9 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 			bestStep, res.ValCE, res.ValPPL)
 	}
 	cfg.logf("oracle answer L2 %.4f  bit-projection L2 %.4f  halt rate %.3f", ans, bit, valHalt)
-	cfg.logf("example query layer0 machine=%s tape=%s halts=%v", res.ExampleMachine, res.ExampleTape, res.ExampleHalts)
+	if res.ExampleMachine != "" {
+		cfg.logf("example query layer0 machine=%s tape=%s halts=%v", res.ExampleMachine, res.ExampleTape, res.ExampleHalts)
+	}
 	if cfg.SampleN > 0 {
 		cfg.logf("sample prompt %q", cfg.Prompt)
 		cfg.logf("sample continuation:\n%s", res.Sample)
@@ -633,12 +671,7 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 			return nil, err
 		}
 		jp := filepath.Join(cfg.OutDir, "result.json")
-		buf, err := json.MarshalIndent(res, "", "  ")
-		if err != nil {
-			return nil, err
-		}
-		buf = append(buf, '\n')
-		if err := os.WriteFile(jp, buf, 0o644); err != nil {
+		if err := writeResult(jp, res); err != nil {
 			return nil, err
 		}
 		cfg.logf("wrote %s", bestPath)
@@ -646,6 +679,63 @@ func Train(cfg TrainConfig) (*TrainResult, error) {
 	}
 	cfg.logf("TRAIN_DONE val_ce=%.4f val_ppl=%.2f", res.ValCE, res.ValPPL)
 	return res, nil
+}
+
+type compareSide struct {
+	Oracle   bool    `json:"oracle"`
+	Params   int     `json:"params"`
+	ValCE    float64 `json:"val_ce"`
+	ValPPL   float64 `json:"val_ppl"`
+	HaltRate float64 `json:"halt_rate"`
+	BestStep int     `json:"best_step"`
+}
+
+type compareReport struct {
+	Oracle   compareSide `json:"oracle"`
+	NoOracle compareSide `json:"no_oracle"`
+}
+
+func sideOf(res *TrainResult) compareSide {
+	return compareSide{
+		Oracle:   res.Oracle,
+		Params:   res.Params,
+		ValCE:    res.ValCE,
+		ValPPL:   res.ValPPL,
+		HaltRate: res.HaltRate,
+		BestStep: res.BestStep,
+	}
+}
+
+// runCompare trains the language model twice from the same seed, data, and
+// schedule: once with the oracle sublayer and once without it.
+func runCompare(cfg TrainConfig) (onRes, offRes *TrainResult, err error) {
+	on := cfg
+	on.Model.NoOracle = false
+	off := cfg
+	off.Model.NoOracle = true
+	if cfg.OutDir != "" {
+		on.OutDir = filepath.Join(cfg.OutDir, "oracle")
+		off.OutDir = filepath.Join(cfg.OutDir, "no-oracle")
+	}
+	onRes, err = Train(on)
+	if err != nil {
+		return nil, nil, err
+	}
+	offRes, err = Train(off)
+	if err != nil {
+		return onRes, nil, err
+	}
+	cfg.logf("compare  oracle val_ce %.4f (ppl %.2f)  no-oracle val_ce %.4f (ppl %.2f)",
+		onRes.ValCE, onRes.ValPPL, offRes.ValCE, offRes.ValPPL)
+	if cfg.OutDir != "" {
+		rep := compareReport{Oracle: sideOf(onRes), NoOracle: sideOf(offRes)}
+		path := filepath.Join(cfg.OutDir, "compare.json")
+		if err := writeResult(path, rep); err != nil {
+			return onRes, offRes, err
+		}
+		cfg.logf("wrote %s", path)
+	}
+	return onRes, offRes, nil
 }
 
 func boundaryPreview(data []byte, cut int) string {
@@ -663,11 +753,15 @@ func boundaryPreview(data []byte, cut int) string {
 func trainFromArgs(args []string) error {
 	fs := flag.NewFlagSet("train", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: oracle train [flags]\n\nTrain a byte-level transformer with a halting-oracle sublayer.\nThe text file is split 90%% train / 10%% validation by byte offset.\nThe default run walks every training window once and scores every validation window.\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: oracle train [flags]\n\nTrain a byte-level transformer with a halting-oracle sublayer.\nThe text file is split 90%% train / 10%% validation by byte offset.\nThe default run walks every training window once and scores every validation window.\n-oracle=false drops the oracle sublayer. -compare trains both and reports both validation losses.\n-task halt trains a head on M#W strings labeled by the oracle.\n\n")
 		fs.PrintDefaults()
 	}
 	data := fs.String("data", "100.txt.utf-8", "UTF-8 text file")
 	more := fs.Bool("more", false, "append the first 10 texts in txt-files.tar.zip to the training split")
+	task := fs.String("task", "lm", "lm is next-byte loss; halt labels M#W strings with the oracle")
+	oracleOn := fs.Bool("oracle", true, "query the halting oracle in each block")
+	compare := fs.Bool("compare", false, "train the language model with the oracle on and off")
+	haltN := fs.Int("halt-n", 2048, "M#W examples for -task halt")
 	steps := fs.Int("steps", 0, "optimizer steps; 0 is one pass over the training split")
 	batch := fs.Int("batch", 16, "batch size")
 	ctx := fs.Int("ctx", 64, "context length")
@@ -690,6 +784,20 @@ func trainFromArgs(args []string) error {
 		}
 		return err
 	}
+	switch *task {
+	case "lm", "halt":
+	default:
+		return fmt.Errorf("unknown task %q", *task)
+	}
+	if *compare && *task != "lm" {
+		return fmt.Errorf("-compare applies to the language-model task")
+	}
+	if *more && *task != "lm" {
+		return fmt.Errorf("-more applies to the language-model task")
+	}
+	if *task == "halt" && *haltN < 2 {
+		return fmt.Errorf("-halt-n must be at least 2")
+	}
 	cfg := defaultConfig()
 	cfg.Ctx = *ctx
 	cfg.DModel = *dmodel
@@ -698,6 +806,7 @@ func trainFromArgs(args []string) error {
 	cfg.MaxSteps = *oracleSteps
 	cfg.OracleStates = *oracleStates
 	cfg.OracleInput = *oracleInput
+	cfg.NoOracle = !*oracleOn
 	var logFile *os.File
 	logFn := func(msg string) {
 		fmt.Fprintln(os.Stdout, msg)
@@ -723,7 +832,7 @@ func trainFromArgs(args []string) error {
 		morePath = "txt-files.tar.zip"
 		moreN = moreTextCount
 	}
-	_, err := Train(TrainConfig{
+	tc := TrainConfig{
 		DataPath:  *data,
 		Steps:     *steps,
 		Batch:     *batch,
@@ -737,8 +846,18 @@ func trainFromArgs(args []string) error {
 		SampleN:   *sampleN,
 		MorePath:  morePath,
 		MoreN:     moreN,
+		HaltN:     *haltN,
 		Model:     cfg,
 		Log:       logFn,
-	})
+	}
+	var err error
+	switch {
+	case *compare:
+		_, _, err = runCompare(tc)
+	case *task == "halt":
+		_, err = TrainHalt(tc)
+	default:
+		_, err = Train(tc)
+	}
 	return err
 }

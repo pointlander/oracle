@@ -11,7 +11,7 @@ import (
 )
 
 // OracleTransformer is a decoder-only Transformer with a halting-oracle
-// sublayer in every block.
+// sublayer in every block. Config.NoOracle drops that sublayer.
 //
 // Each block pools its residual stream and maps that vector to a total
 // binary Turing machine plus a tape. It then calls HaltingOracle. The
@@ -42,6 +42,11 @@ type Config struct {
 	OracleInput  int
 	MaxSteps     int
 	AuxWeight    float32
+	// NoOracle drops the oracle sublayer. The backbone is initialized with the
+	// same RNG draws as the oracle model, so a paired run is a control.
+	NoOracle bool
+	// Classify adds a halt/non-halt head on the last token.
+	Classify bool
 }
 
 func (c Config) validate() error {
@@ -318,6 +323,9 @@ func (b *block) Forward(x *Tensor, B, T int) (*Tensor, *Tensor) {
 	x = Add(x, b.Attn.Forward(h, B, T))
 	h = LayerNorm(x, b.LN2.G, b.LN2.B)
 	x = Add(x, b.MLP.Forward(h))
+	if b.Ora == nil {
+		return x, scalarTensor(0)
+	}
 	h = LayerNorm(x, b.LN3.G, b.LN3.B)
 	delta, aux := b.Ora.Forward(h, B, T)
 	return Add(x, delta), aux
@@ -331,6 +339,8 @@ type OracleTransformer struct {
 	Blocks []*block
 	Final  *lnParams
 	Sim    HaltingOracle
+	// ClassW and ClassB map the last position to a halt logit.
+	ClassW, ClassB *Tensor
 }
 
 func NewModel(cfg Config, rng *rand.Rand) (*OracleTransformer, error) {
@@ -346,16 +356,27 @@ func NewModel(cfg Config, rng *rand.Rand) (*OracleTransformer, error) {
 	m.Pos = paramTensor([]int{cfg.Ctx, cfg.DModel}, rng, 0.02, true)
 	outScale := 0.02 / math.Sqrt(2*float64(cfg.Layers))
 	for layer := 0; layer < cfg.Layers; layer++ {
-		m.Blocks = append(m.Blocks, &block{
+		// Oracle parameters are always drawn, then dropped for a NoOracle model,
+		// so both models share the backbone initialization at the same seed.
+		blk := &block{
 			LN1:  newLN(cfg.DModel),
-			LN2:  newLN(cfg.DModel),
-			LN3:  newLN(cfg.DModel),
 			Attn: newMultiHead(cfg.DModel, cfg.Heads, rng, outScale),
+			LN2:  newLN(cfg.DModel),
 			MLP:  newMLP(cfg.DModel, rng, outScale),
-			Ora:  newOracleLayer(cfg.DModel, cfg.OracleStates, cfg.OracleInput, rng, sim),
-		})
+		}
+		ln3 := newLN(cfg.DModel)
+		ora := newOracleLayer(cfg.DModel, cfg.OracleStates, cfg.OracleInput, rng, sim)
+		if !cfg.NoOracle {
+			blk.LN3 = ln3
+			blk.Ora = ora
+		}
+		m.Blocks = append(m.Blocks, blk)
 	}
 	m.Final = newLN(cfg.DModel)
+	if cfg.Classify {
+		m.ClassW = paramTensor([]int{cfg.DModel, 1}, rng, 0.02, true)
+		m.ClassB = paramTensor([]int{1}, nil, 0, false)
+	}
 	return m, nil
 }
 
@@ -367,17 +388,27 @@ func (m *OracleTransformer) Params() []*Tensor {
 			b.Attn.WQ, b.Attn.BQ, b.Attn.WK, b.Attn.BK, b.Attn.WV, b.Attn.BV, b.Attn.WO, b.Attn.BO,
 			b.LN2.G, b.LN2.B,
 			b.MLP.W1, b.MLP.B1, b.MLP.W2, b.MLP.B2,
-			b.LN3.G, b.LN3.B,
-			b.Ora.QueryW, b.Ora.QueryB, b.Ora.BitW, b.Ora.BitB, b.Ora.AuxW, b.Ora.AuxB, b.Ora.Answer,
 		)
+		if b.Ora != nil {
+			ps = append(ps,
+				b.LN3.G, b.LN3.B,
+				b.Ora.QueryW, b.Ora.QueryB, b.Ora.BitW, b.Ora.BitB, b.Ora.AuxW, b.Ora.AuxB, b.Ora.Answer,
+			)
+		}
 	}
 	ps = append(ps, m.Final.G, m.Final.B)
+	if m.ClassW != nil {
+		ps = append(ps, m.ClassW, m.ClassB)
+	}
 	return ps
 }
 
 func (m *OracleTransformer) haltRate() float64 {
 	c, h := 0, 0
 	for _, b := range m.Blocks {
+		if b.Ora == nil {
+			continue
+		}
 		c += b.Ora.Calls
 		h += b.Ora.Halts
 	}
@@ -389,14 +420,39 @@ func (m *OracleTransformer) haltRate() float64 {
 
 func (m *OracleTransformer) resetOracleStats() {
 	for _, b := range m.Blocks {
+		if b.Ora == nil {
+			continue
+		}
 		b.Ora.Calls = 0
 		b.Ora.Halts = 0
 	}
 }
 
-// Logits returns next-byte logits [B*T, V], the mean oracle BCE, and the
+// gatherLast returns the hidden state at the last position of each sequence.
+func gatherLast(x *Tensor, B, T int) *Tensor {
+	D := x.Dims[1]
+	ensure(x.Dims[0] == B*T, "gatherLast rows %d", x.Dims[0])
+	out := newTensor([]int{B, D}, nil)
+	for b := 0; b < B; b++ {
+		copy(out.Data[b*D:(b+1)*D], x.Data[((b+1)*T-1)*D:(b+1)*T*D])
+	}
+	return track(out, []*Tensor{x}, func() {
+		if !x.gradAcc {
+			return
+		}
+		for b := 0; b < B; b++ {
+			dst := x.Grad[((b+1)*T-1)*D : (b+1)*T*D]
+			src := out.Grad[b*D : (b+1)*D]
+			for d := 0; d < D; d++ {
+				dst[d] += src[d]
+			}
+		}
+	})
+}
+
+// features is the final hidden state [B*T, D], the mean oracle BCE, and the
 // fraction of oracle queries that halted.
-func (m *OracleTransformer) Logits(toks []int, B, T int) (*Tensor, *Tensor, float64) {
+func (m *OracleTransformer) features(toks []int, B, T int) (*Tensor, *Tensor, float64) {
 	ensure(T >= 1 && T <= m.Cfg.Ctx, "T %d ctx %d", T, m.Cfg.Ctx)
 	ensure(len(toks) == B*T, "tokens %d != %d", len(toks), B*T)
 	m.resetOracleStats()
@@ -413,8 +469,32 @@ func (m *OracleTransformer) Logits(toks []int, B, T int) (*Tensor, *Tensor, floa
 	}
 	auxMean := Scale(auxSum, 1/float32(len(m.Blocks)))
 	x = LayerNorm(x, m.Final.G, m.Final.B)
-	logits := MatMul(x, Transpose(m.Tok))
-	return logits, auxMean, m.haltRate()
+	return x, auxMean, m.haltRate()
+}
+
+// Logits returns next-byte logits [B*T, V], the mean oracle BCE, and the
+// fraction of oracle queries that halted.
+func (m *OracleTransformer) Logits(toks []int, B, T int) (*Tensor, *Tensor, float64) {
+	h, aux, halt := m.features(toks, B, T)
+	return MatMul(h, Transpose(m.Tok)), aux, halt
+}
+
+// ClassifyLoss is the mean BCE of the halt head against labels in {0, 1}.
+// Accuracy is the fraction of logits whose sign matches the label.
+func (m *OracleTransformer) ClassifyLoss(toks []int, labels []int, B, T int) (loss *Tensor, acc float64) {
+	ensure(m.ClassW != nil, "model has no halt head")
+	ensure(len(labels) == B, "labels %d != %d", len(labels), B)
+	h, _, _ := m.features(toks, B, T)
+	logit := AddBias(MatMul(gatherLast(h, B, T), m.ClassW), m.ClassB)
+	loss = BCEWithLogits(logit, labels)
+	correct := 0
+	for i, y := range labels {
+		pred := logit.Data[i] >= 0
+		if pred == (y == 1) {
+			correct++
+		}
+	}
+	return loss, float64(correct) / float64(B)
 }
 
 // Loss is next-byte cross-entropy plus AuxWeight times the mean oracle BCE.
