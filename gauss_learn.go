@@ -152,16 +152,26 @@ func lossAndWriteGrad(weights []float64, moves []int, target []byte, tau float64
 	return loss / float64(len(target)), grad, string(out), nil
 }
 
+// maxMoveUnroll is the deepest left/right tree expanded while learning moves.
+// A text of this length has 2^maxMoveUnroll root-to-leaf paths.
+const maxMoveUnroll = 16
+
+// defaultMoveLR is the step size on move logits. It is separate from the
+// write learning rate, which is scaled to cancel 1/τ².
+const defaultMoveLR = 1
+
 // gaussLearnConfig trains write weights of a 256-symbol machine.
-// Moves is a string of L and R. Empty is one right move per target byte.
-// LR <= 0 uses Temp², which cancels the 1/τ² in the symbol partial.
+// Moves is a string of L and R. Empty learns a move logit per state by
+// unrolling both branches. LR <= 0 uses Temp², which cancels the 1/τ² in
+// the symbol partial. MoveLR <= 0 uses defaultMoveLR.
 type gaussLearnConfig struct {
-	Text  string
-	Moves string
-	Iters int
-	LR    float64
-	Temp  float64
-	Log   func(string)
+	Text   string
+	Moves  string
+	Iters  int
+	LR     float64
+	MoveLR float64
+	Temp   float64
+	Log    func(string)
 }
 
 func (cfg *gaussLearnConfig) apply() error {
@@ -177,6 +187,9 @@ func (cfg *gaussLearnConfig) apply() error {
 	if cfg.LR <= 0 {
 		cfg.LR = cfg.Temp * cfg.Temp
 	}
+	if cfg.MoveLR <= 0 {
+		cfg.MoveLR = defaultMoveLR
+	}
 	return nil
 }
 
@@ -186,11 +199,218 @@ func (cfg gaussLearnConfig) logf(format string, args ...any) {
 	}
 }
 
+// pathSum is the total symbol cross-entropy of one root-to-leaf path, and it
+// adds that path's write partials, already multiplied by prob, into writeGrad.
+func pathSum(weights []float64, moves []int, target []byte, tau, prob float64, writeGrad []float64) float64 {
+	pos := make([]int, len(weights))
+	head := 0
+	for t := range weights {
+		pos[t] = head
+		head += moves[t]
+	}
+	sum := 0.0
+	for i, y := range target {
+		mu := 0.0
+		n := 0
+		for t := range pos {
+			if pos[t] == i {
+				mu += weights[t]
+				n++
+			}
+		}
+		if n > 0 {
+			mu /= float64(n)
+		}
+		nll, dmu := symbolLoss(mu, tau, int(y))
+		sum += nll
+		if n == 0 {
+			continue
+		}
+		share := prob * dmu / float64(n)
+		for t := range pos {
+			if pos[t] == i {
+				writeGrad[t] += share
+			}
+		}
+	}
+	return sum
+}
+
+// treeLoss unrolls the machine the way an RNN is unrolled, except each step
+// branches left and right. A path probability is the product of its branch
+// probabilities. The loss is the expected total symbol cross-entropy. The
+// write partial is the probability-weighted average of the path partials. The
+// move-logit partial at a step is (E[loss|right] - E[loss|left]) p (1-p).
+// The move after the last write does not change the tape, so its partial is 0.
+func treeLoss(weights, logits []float64, target []byte, tau float64) (mean float64, writeGrad, moveGrad []float64, mode string, tape string, err error) {
+	if len(weights) != len(logits) || len(weights) == 0 {
+		return 0, nil, nil, "", "", fmt.Errorf("weights and move logits differ in length")
+	}
+	if len(weights) > maxMoveUnroll {
+		return 0, nil, nil, "", "", fmt.Errorf("move tree unrolls at most %d steps", maxMoveUnroll)
+	}
+	steps := len(weights)
+	p := make([]float64, steps)
+	for t, a := range logits {
+		p[t] = logistic(a)
+	}
+	writeGrad = make([]float64, steps)
+	rightLoss := make([]float64, steps)
+	leftLoss := make([]float64, steps)
+	rightMass := make([]float64, steps)
+	leftMass := make([]float64, steps)
+	moves := make([]int, steps)
+	expect := 0.0
+	nPath := 1 << steps
+	for mask := 0; mask < nPath; mask++ {
+		logp := 0.0
+		dead := false
+		for t := 0; t < steps; t++ {
+			if mask>>t&1 == 1 {
+				moves[t] = 1
+				if p[t] == 0 {
+					dead = true
+					break
+				}
+				logp += math.Log(p[t])
+			} else {
+				moves[t] = -1
+				if p[t] == 1 {
+					dead = true
+					break
+				}
+				logp += math.Log(1 - p[t])
+			}
+		}
+		if dead || logp < -745 {
+			continue
+		}
+		prob := math.Exp(logp)
+		total := pathSum(weights, moves, target, tau, prob, writeGrad)
+		expect += prob * total
+		for t := 0; t < steps; t++ {
+			if moves[t] > 0 {
+				rightLoss[t] += prob * total
+				rightMass[t] += prob
+			} else {
+				leftLoss[t] += prob * total
+				leftMass[t] += prob
+			}
+		}
+	}
+	moveGrad = make([]float64, steps)
+	for t := 0; t < steps; t++ {
+		if rightMass[t] == 0 || leftMass[t] == 0 {
+			continue
+		}
+		dLdp := rightLoss[t]/rightMass[t] - leftLoss[t]/leftMass[t]
+		pt := p[t]
+		moveGrad[t] = dLdp * pt * (1 - pt)
+	}
+	modeMoves := make([]int, steps)
+	for t, a := range logits {
+		modeMoves[t] = -1
+		if a >= 0 {
+			modeMoves[t] = 1
+		}
+	}
+	_, _, tape, err = lossAndWriteGrad(weights, modeMoves, target, tau)
+	if err != nil {
+		return 0, nil, nil, "", "", err
+	}
+	n := float64(len(target))
+	return expect / n, writeGrad, moveGrad, formatMoves(modeMoves), tape, nil
+}
+
+func formatProbs(logits []float64) string {
+	b := make([]byte, 0, len(logits)*5)
+	for i, a := range logits {
+		if i > 0 {
+			b = append(b, ' ')
+		}
+		b = append(b, fmt.Sprintf("%.2f", logistic(a))...)
+	}
+	return string(b)
+}
+
+// learnMoveTree follows the partials of the expected loss through the unrolled
+// move tree. The reported tape is the nearest-byte read along the mode path.
+// Steps other than the last must put at least probability 0.9 on that path's
+// direction. The last move has partial 0.
+func learnMoveTree(cfg gaussLearnConfig) error {
+	target := []byte(cfg.Text)
+	if len(target) > maxMoveUnroll {
+		return fmt.Errorf("move tree unrolls at most %d steps", maxMoveUnroll)
+	}
+	weights := make([]float64, len(target))
+	logits := make([]float64, len(target))
+	cfg.logf("256-symbol gaussian machine")
+	cfg.logf("  target %s", strconv.Quote(cfg.Text))
+	cfg.logf("  %d states, alphabet 256, both moves unrolled at every state", len(target))
+	cfg.logf("  loss is the expected cross-entropy over the move tree")
+	cfg.logf("  each step follows the partial of that loss through the writes and the move logits")
+	var loss float64
+	tape := ""
+	mode := ""
+	var err error
+	for iter := 0; iter <= cfg.Iters; iter++ {
+		var writeGrad, moveGrad []float64
+		loss, writeGrad, moveGrad, mode, tape, err = treeLoss(weights, logits, target, cfg.Temp)
+		if err != nil {
+			return err
+		}
+		sure := movesDecided(logits)
+		if iter == 0 || iter == cfg.Iters || iter%4 == 0 || (tape == cfg.Text && sure) {
+			cfg.logf("iter %d  loss %.6f  moves %s  p %s  tape %s", iter, loss, mode, formatProbs(logits), strconv.Quote(tape))
+		}
+		if tape == cfg.Text && sure && iter > 0 {
+			break
+		}
+		if iter == cfg.Iters {
+			break
+		}
+		for i := range weights {
+			weights[i] -= cfg.LR * writeGrad[i]
+			logits[i] -= cfg.MoveLR * moveGrad[i]
+			if logits[i] > 20 {
+				logits[i] = 20
+			}
+			if logits[i] < -20 {
+				logits[i] = -20
+			}
+		}
+	}
+	if tape != cfg.Text || !movesDecided(logits) {
+		return fmt.Errorf("tape %s moves %s after %d steps", strconv.Quote(tape), mode, cfg.Iters)
+	}
+	return nil
+}
+
+// movesDecided reports whether every move except the last puts probability
+// at least 0.9 on its mode direction. One step has no later write, so the
+// only move is free.
+func movesDecided(logits []float64) bool {
+	if len(logits) <= 1 {
+		return true
+	}
+	for _, a := range logits[:len(logits)-1] {
+		p := logistic(a)
+		if p < 0.9 && p > 0.1 {
+			return false
+		}
+	}
+	return true
+}
+
 // learnGaussText follows ∂L/∂write for the bytes of cfg.Text.
+// With no fixed moves, it also follows ∂L/∂move through the unrolled tree.
 // The learned tape is the nearest byte to each cell mean.
 func learnGaussText(cfg gaussLearnConfig) error {
 	if err := cfg.apply(); err != nil {
 		return err
+	}
+	if cfg.Moves == "" {
+		return learnMoveTree(cfg)
 	}
 	target := []byte(cfg.Text)
 	moves, err := parseMoves(cfg.Moves, len(target))

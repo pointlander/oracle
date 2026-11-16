@@ -6,6 +6,7 @@ package main
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -105,6 +106,66 @@ func TestTwoWritePartialMatchesFiniteDifference(t *testing.T) {
 	}
 }
 
+func TestMoveTreePartialMatchesFiniteDifference(t *testing.T) {
+	weights := []float64{3, -2}
+	logits := []float64{0.4, -0.2}
+	target := []byte{20, 30}
+	const tau = 4.0
+	_, writeGrad, moveGrad, _, _, err := treeLoss(weights, logits, target, tau)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const eps = 1e-4
+	total := func(w, a []float64) float64 {
+		t.Helper()
+		mean, _, _, _, _, err := treeLoss(w, a, target, tau)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mean * float64(len(target))
+	}
+	for i := range weights {
+		up := append([]float64(nil), weights...)
+		dn := append([]float64(nil), weights...)
+		up[i] += eps
+		dn[i] -= eps
+		diff := (total(up, logits) - total(dn, logits)) / (2 * eps)
+		if math.Abs(writeGrad[i]-diff) > 1e-3 {
+			t.Fatalf("write %d partial %.6f finite difference %.6f", i, writeGrad[i], diff)
+		}
+	}
+	for i := range logits {
+		up := append([]float64(nil), logits...)
+		dn := append([]float64(nil), logits...)
+		up[i] += eps
+		dn[i] -= eps
+		diff := (total(weights, up) - total(weights, dn)) / (2 * eps)
+		if math.Abs(moveGrad[i]-diff) > 1e-3 {
+			t.Fatalf("move %d partial %.6f finite difference %.6f", i, moveGrad[i], diff)
+		}
+	}
+	if math.Abs(moveGrad[len(moveGrad)-1]) > 1e-9 {
+		t.Fatalf("last move partial %.6f", moveGrad[len(moveGrad)-1])
+	}
+}
+
+func TestMoveTreeAtZeroHasNoDirectionPartial(t *testing.T) {
+	weights := []float64{0, 0}
+	logits := []float64{0, 0}
+	_, _, moveGrad, mode, _, err := treeLoss(weights, logits, []byte("AB"), 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != "RR" {
+		t.Fatalf("mode %s", mode)
+	}
+	for i, g := range moveGrad {
+		if math.Abs(g) > 1e-9 {
+			t.Fatalf("move %d partial %.6f", i, g)
+		}
+	}
+}
+
 func TestGaussLearnsHelloWorld(t *testing.T) {
 	err := learnGaussText(gaussLearnConfig{
 		Text:  "Hello World!",
@@ -113,6 +174,17 @@ func TestGaussLearnsHelloWorld(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMoveTreeRejectsLongText(t *testing.T) {
+	err := learnGaussText(gaussLearnConfig{
+		Text:  strings.Repeat("a", maxMoveUnroll+1),
+		Iters: 1,
+		Temp:  8,
+	})
+	if err == nil {
+		t.Fatal("expected the unroll cap to reject the text")
 	}
 }
 
