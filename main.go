@@ -242,6 +242,8 @@ func main() {
 			err = netFromArgs(os.Args[2:])
 		case "netlm", "-netlm":
 			err = netLMFromArgs(os.Args[2:])
+		case "gauss", "-gauss":
+			err = gaussFromArgs(os.Args[2:])
 		default:
 			demo()
 			return

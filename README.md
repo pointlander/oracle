@@ -123,13 +123,26 @@ go run . netlm -h
 
 The default tries 1-state and 2-state machines, keeps the higher accuracy, and uses an 8-step bound, the first 20,000 training bytes, and 2,000 validation bytes. `-states 0` is that default.
 
+## Gaussian tape
+
+`gauss` runs total 2-symbol machines whose tape cells are Gaussians. Each transition's write weight is drawn once from a standard normal. A blank cell is sampled from that same normal. A sample above 0 is the symbol 1. Every other sample, including 0, is the symbol 0. The write then folds its weight into the cell with Welford's update. The cell's mean is the average of the weights written there, and its deviation is the root mean square of those weights. A prepared input cell starts as one observation of `+1` or `-1`, so its first sample is that bit. The head, the state, and the step bound work as they do in `UniversalBoundedSimulator`. A run that is still going at `-oracle-steps` counts as non-halting.
+
+The report covers 1-state and 2-state machines. It gives the halt rate on a blank tape, how often that halt bit changes when the same machine is repeated, and the halt rate on a short tape of fixed `-1` cells and of fixed `+1` cells. It also compares each machine with the binary machine that writes the sign of the same weights and reads a tape of zeros. Cell lines say how many writes land on one cell and whether that cell's deviation stays 0.
+
+```bash
+go run . gauss
+go run . gauss -h
+```
+
+The defaults are a 64-step bound, 2048 machines, 16 repeats, input length 8, and seed 1.
+
 ## Tests
 
 ```bash
 go test
 ```
 
-The tests check the simulator, the machine encoding, gradients of the autograd ops, that a tiny model can reduce loss on a repeated string, that the oracle-off control and the halt-label task run, that the Huffman code round-trips and the genetic search raises next-bit accuracy, that a network passes halt bits along its tapes and sits at a fixed point when every machine ignores its tape, and that a symbol oracle emits the byte whose machine does not halt and a search over distinct programs learns a high-bit switch.
+The tests check the simulator, the machine encoding, gradients of the autograd ops, that a tiny model can reduce loss on a repeated string, that the oracle-off control and the halt-label task run, that the Huffman code round-trips and the genetic search raises next-bit accuracy, that a network passes halt bits along its tapes and sits at a fixed point when every machine ignores its tape, and that a symbol oracle emits the byte whose machine does not halt and a search over distinct programs learns a high-bit switch, and that a gaussian tape reads a positive sample as 1 and folds each write into a running mean and deviation.
 
 ## License
 
