@@ -6,7 +6,6 @@ package main
 
 import (
 	"math"
-	"strings"
 	"testing"
 )
 
@@ -177,14 +176,26 @@ func TestGaussLearnsHelloWorld(t *testing.T) {
 	}
 }
 
-func TestMoveTreeRejectsLongText(t *testing.T) {
+func TestOneUnrollRejectsMoreThanABlock(t *testing.T) {
+	n := maxMoveUnroll + 1
+	weights := make([]float64, n)
+	logits := make([]float64, n)
+	target := make([]byte, n)
+	_, _, _, _, _, err := treeLoss(weights, logits, target, 8)
+	if err == nil {
+		t.Fatal("expected one unroll to reject more than a block")
+	}
+}
+
+func TestGaussLearnsTextLongerThanOneBlock(t *testing.T) {
+	// 18 symbols: one full block of 16 and a second block of 2.
 	err := learnGaussText(gaussLearnConfig{
-		Text:  strings.Repeat("a", maxMoveUnroll+1),
-		Iters: 1,
+		Text:  "Hello World! Again",
+		Iters: 16,
 		Temp:  8,
 	})
-	if err == nil {
-		t.Fatal("expected the unroll cap to reject the text")
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

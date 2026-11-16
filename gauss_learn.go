@@ -334,21 +334,47 @@ func formatProbs(logits []float64) string {
 }
 
 // learnMoveTree follows the partials of the expected loss through the unrolled
-// move tree. The reported tape is the nearest-byte read along the mode path.
-// Steps other than the last must put at least probability 0.9 on that path's
-// direction. The last move has partial 0.
+// move tree. Text longer than one unroll is trained in successive blocks of
+// maxMoveUnroll symbols. Each block starts on its first symbol. The block
+// tapes are joined in order. The reported tape is the nearest-byte read along
+// each block's mode path.
 func learnMoveTree(cfg gaussLearnConfig) error {
 	target := []byte(cfg.Text)
-	if len(target) > maxMoveUnroll {
-		return fmt.Errorf("move tree unrolls at most %d steps", maxMoveUnroll)
+	if len(target) <= maxMoveUnroll {
+		cfg.logf("256-symbol gaussian machine")
+		cfg.logf("  target %s", strconv.Quote(cfg.Text))
+		cfg.logf("  %d states, alphabet 256, both moves unrolled at every state", len(target))
+		cfg.logf("  loss is the expected cross-entropy over the move tree")
+		cfg.logf("  each step follows the partial of that loss through the writes and the move logits")
+		return trainMoveBlock(cfg, target, 0)
 	}
-	weights := make([]float64, len(target))
-	logits := make([]float64, len(target))
 	cfg.logf("256-symbol gaussian machine")
 	cfg.logf("  target %s", strconv.Quote(cfg.Text))
-	cfg.logf("  %d states, alphabet 256, both moves unrolled at every state", len(target))
-	cfg.logf("  loss is the expected cross-entropy over the move tree")
+	cfg.logf("  %d symbols, alphabet 256, blocks of %d", len(target), maxMoveUnroll)
+	cfg.logf("  each block unrolls both moves from its first symbol")
+	cfg.logf("  loss is the expected cross-entropy over that block's move tree")
 	cfg.logf("  each step follows the partial of that loss through the writes and the move logits")
+	for start := 0; start < len(target); start += maxMoveUnroll {
+		end := start + maxMoveUnroll
+		if end > len(target) {
+			end = len(target)
+		}
+		cfg.logf("block [%d:%d]", start, end)
+		if err := trainMoveBlock(cfg, target[start:end], start); err != nil {
+			return err
+		}
+	}
+	cfg.logf("tape %s", strconv.Quote(cfg.Text))
+	return nil
+}
+
+// trainMoveBlock learns one unroll. start is the block's index in the full
+// text and is used only in the error. Steps other than the last must put at
+// least probability 0.9 on the mode direction. The last move has partial 0.
+func trainMoveBlock(cfg gaussLearnConfig, target []byte, start int) error {
+	text := string(target)
+	weights := make([]float64, len(target))
+	logits := make([]float64, len(target))
 	var loss float64
 	tape := ""
 	mode := ""
@@ -360,11 +386,11 @@ func learnMoveTree(cfg gaussLearnConfig) error {
 			return err
 		}
 		sure := movesDecided(logits)
-		if iter == 0 || iter == cfg.Iters || iter%4 == 0 || (tape == cfg.Text && sure) {
+		if iter == 0 || iter == cfg.Iters || iter%4 == 0 || (tape == text && sure) {
 			cfg.logf("iter %d  loss %.6f  moves %s  p %s  tape %s", iter, loss, mode, formatProbs(logits), strconv.Quote(tape))
 		}
-		if tape == cfg.Text && sure && iter > 0 {
-			break
+		if tape == text && sure && iter > 0 {
+			return nil
 		}
 		if iter == cfg.Iters {
 			break
@@ -380,10 +406,7 @@ func learnMoveTree(cfg gaussLearnConfig) error {
 			}
 		}
 	}
-	if tape != cfg.Text || !movesDecided(logits) {
-		return fmt.Errorf("tape %s moves %s after %d steps", strconv.Quote(tape), mode, cfg.Iters)
-	}
-	return nil
+	return fmt.Errorf("block [%d:%d] tape %s moves %s after %d steps", start, start+len(target), strconv.Quote(tape), mode, cfg.Iters)
 }
 
 // movesDecided reports whether every move except the last puts probability
