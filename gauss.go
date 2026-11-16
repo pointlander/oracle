@@ -427,7 +427,7 @@ func printGaussReport(log func(string), rep gaussReport) {
 func gaussFromArgs(args []string) error {
 	fs := flag.NewFlagSet("gauss", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: oracle gauss [flags]\n\nRun 2-symbol machines whose tape cells are Gaussians.\nA sample above 0 is symbol 1. Each write updates that cell's running mean and deviation.\nThe simulator is step-bounded.\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: oracle gauss [flags]\n\nRun 2-symbol machines whose tape cells are Gaussians.\nA sample above 0 is symbol 1. Each write updates that cell's running mean and deviation.\nThe simulator is step-bounded.\n\nWith -text, train a 256-symbol machine so its tape spells that string.\nThe loss is the cross-entropy of a Gaussian over the 256 byte codes, and each step follows the partial derivative with respect to the write weights.\n\n")
 		fs.PrintDefaults()
 	}
 	states := fs.Int("states", 0, "states in each machine; 0 runs 1 and 2")
@@ -436,11 +436,23 @@ func gaussFromArgs(args []string) error {
 	repeats := fs.Int("repeats", 16, "blank-tape repeats of each machine")
 	input := fs.Int("input", 8, "cells in the fixed +1 and -1 tapes")
 	seed := fs.Int64("seed", 1, "seed")
+	text := fs.String("text", "", "train write weights so the tape spells this text")
+	iters := fs.Int("iters", 16, "gradient steps when -text is set")
+	lr := fs.Float64("lr", 0, "learning rate when -text is set; 0 uses the temperature squared")
+	temp := fs.Float64("temp", 8, "symbol-softmax temperature when -text is set")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
 		return err
+	}
+	log := func(msg string) {
+		fmt.Fprintln(os.Stdout, msg)
+	}
+	if *text != "" {
+		return learnGaussText(gaussLearnConfig{
+			Text: *text, Iters: *iters, LR: *lr, Temp: *temp, Log: log,
+		})
 	}
 	if *states < 0 || *states > 2 {
 		return fmt.Errorf("states must be 1 or 2, or 0 to run both")
@@ -448,9 +460,6 @@ func gaussFromArgs(args []string) error {
 	list := []int{*states}
 	if *states == 0 {
 		list = []int{1, 2}
-	}
-	log := func(msg string) {
-		fmt.Fprintln(os.Stdout, msg)
 	}
 	for _, st := range list {
 		rep, err := analyzeGauss(gaussConfig{

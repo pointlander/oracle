@@ -136,13 +136,19 @@ go run . gauss -h
 
 The defaults are a 64-step bound, 2048 machines, 16 repeats, input length 8, and seed 1.
 
+`-text` trains a 256-symbol machine whose tape should spell that string. The machine has one state per byte, and every read symbol in a state shares one write weight. The head writes that weight and moves right. The loss is the cross-entropy of a Gaussian softmax over byte codes 0..255, using the cell mean. Each step subtracts the learning rate times the partial derivative of that loss with respect to the write weight. The hard nearest-byte read is constant between integers, so the softmax is what carries the derivative. A learning rate of 0 uses the temperature squared.
+
+```bash
+go run . gauss -text 'Hello World!'
+```
+
 ## Tests
 
 ```bash
 go test
 ```
 
-The tests check the simulator, the machine encoding, gradients of the autograd ops, that a tiny model can reduce loss on a repeated string, that the oracle-off control and the halt-label task run, that the Huffman code round-trips and the genetic search raises next-bit accuracy, that a network passes halt bits along its tapes and sits at a fixed point when every machine ignores its tape, and that a symbol oracle emits the byte whose machine does not halt and a search over distinct programs learns a high-bit switch, and that a gaussian tape reads a positive sample as 1 and folds each write into a running mean and deviation.
+The tests check the simulator, the machine encoding, gradients of the autograd ops, that a tiny model can reduce loss on a repeated string, that the oracle-off control and the halt-label task run, that the Huffman code round-trips and the genetic search raises next-bit accuracy, that a network passes halt bits along its tapes and sits at a fixed point when every machine ignores its tape, and that a symbol oracle emits the byte whose machine does not halt and a search over distinct programs learns a high-bit switch, and that a gaussian tape reads a positive sample as 1 and folds each write into a running mean and deviation, and that the partial of a symbol cross-entropy teaches a 256-symbol gaussian machine to write Hello World!.
 
 ## License
 
