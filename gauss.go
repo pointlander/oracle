@@ -427,7 +427,7 @@ func printGaussReport(log func(string), rep gaussReport) {
 func gaussFromArgs(args []string) error {
 	fs := flag.NewFlagSet("gauss", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: oracle gauss [flags]\n\nRun 2-symbol machines whose tape cells are Gaussians.\nA sample above 0 is symbol 1. Each write updates that cell's running mean and deviation.\nThe simulator is step-bounded.\n\nWith -text, train a 256-symbol machine so its tape spells that string.\nThe loss is the cross-entropy of a Gaussian over the 256 byte codes, and each step follows the partial derivative with respect to the write weights.\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: oracle gauss [flags]\n\nRun 2-symbol machines whose tape cells are Gaussians.\nA sample above 0 is symbol 1. Each write updates that cell's running mean and deviation.\nThe simulator is step-bounded.\n\nWith -text, train a 256-symbol machine so its tape spells that string.\nEach state writes one weight and then moves left or right.\n-moves is a string of L and R. The default is one right move per byte.\nThe loss is the cross-entropy of a Gaussian over the 256 byte codes, and each step follows the partial derivative with respect to the write weights.\n\n")
 		fs.PrintDefaults()
 	}
 	states := fs.Int("states", 0, "states in each machine; 0 runs 1 and 2")
@@ -437,6 +437,7 @@ func gaussFromArgs(args []string) error {
 	input := fs.Int("input", 8, "cells in the fixed +1 and -1 tapes")
 	seed := fs.Int64("seed", 1, "seed")
 	text := fs.String("text", "", "train write weights so the tape spells this text")
+	moves := fs.String("moves", "", "L and R moves when -text is set; empty is one right move per byte")
 	iters := fs.Int("iters", 16, "gradient steps when -text is set")
 	lr := fs.Float64("lr", 0, "learning rate when -text is set; 0 uses the temperature squared")
 	temp := fs.Float64("temp", 8, "symbol-softmax temperature when -text is set")
@@ -451,7 +452,7 @@ func gaussFromArgs(args []string) error {
 	}
 	if *text != "" {
 		return learnGaussText(gaussLearnConfig{
-			Text: *text, Iters: *iters, LR: *lr, Temp: *temp, Log: log,
+			Text: *text, Moves: *moves, Iters: *iters, LR: *lr, Temp: *temp, Log: log,
 		})
 	}
 	if *states < 0 || *states > 2 {

@@ -23,31 +23,121 @@ func TestSymbolLossMatchesFiniteDifference(t *testing.T) {
 	}
 }
 
+func TestParseMoves(t *testing.T) {
+	right, err := parseMoves("", 3)
+	if err != nil || len(right) != 3 || right[0] != 1 || right[2] != 1 {
+		t.Fatalf("default %v %v", right, err)
+	}
+	both, err := parseMoves("rL<>+-", 0)
+	want := []int{1, -1, -1, 1, 1, -1}
+	if err != nil || len(both) != len(want) {
+		t.Fatal(err)
+	}
+	for i := range want {
+		if both[i] != want[i] {
+			t.Fatalf("moves %v", both)
+		}
+	}
+	if _, err := parseMoves("RX", 1); err == nil {
+		t.Fatal("expected a rejected move")
+	}
+}
+
 func TestWriteGradientSharesTheMean(t *testing.T) {
-	// Two writes on one cell. Each partial is half of ∂L/∂μ.
-	var cell gaussCell
-	cell.observe(4)
-	cell.observe(8)
-	_, dmu := symbolLoss(cell.mean, 4, 20)
-	want := dmu / 2
-	// Reconstruct the same mean as the average of the two weights and check
-	// the share used by lossAndWriteGrad's one-write path on a twin cell.
-	if cell.n != 2 || cell.mean != 6 {
-		t.Fatalf("mean %v n %d", cell.mean, cell.n)
+	// Positions written: 0, 1, 0. Cell 0 averages weights 0 and 2.
+	weights := []float64{4, 8, 8}
+	moves := []int{1, -1, 1}
+	target := []byte{20, 30}
+	_, grad, tape, err := lossAndWriteGrad(weights, moves, target, 4)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if math.Abs(want-dmu/float64(cell.n)) > 1e-12 {
-		t.Fatal("share")
+	_, dmu0 := symbolLoss(6, 4, 20)
+	_, dmu1 := symbolLoss(8, 4, 30)
+	if math.Abs(grad[0]-dmu0/2) > 1e-9 || math.Abs(grad[2]-dmu0/2) > 1e-9 {
+		t.Fatalf("shares %.6f %.6f want %.6f", grad[0], grad[2], dmu0/2)
 	}
-	// A one-write machine's gradient equals ∂L/∂μ.
-	_, grad := lossAndWriteGrad([]float64{6}, []byte{20}, 4)
-	if math.Abs(grad[0]-dmu) > 1e-9 {
-		t.Fatalf("grad %.6f dmu %.6f", grad[0], dmu)
+	if math.Abs(grad[1]-dmu1) > 1e-9 {
+		t.Fatalf("grad %.6f dmu %.6f", grad[1], dmu1)
+	}
+	if tape != string([]byte{nearestByte(6), nearestByte(8)}) {
+		t.Fatalf("tape %q", tape)
+	}
+	// A write on cell -1 is outside the target window.
+	off := []float64{6, 100}
+	_, grad, _, err = lossAndWriteGrad(off, []int{-1, 1}, []byte{20}, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, dmu := symbolLoss(6, 4, 20)
+	if math.Abs(grad[0]-dmu) > 1e-9 || grad[1] != 0 {
+		t.Fatalf("window grad %.6f off-window %.6f", grad[0], grad[1])
+	}
+}
+
+func TestTwoWritePartialMatchesFiniteDifference(t *testing.T) {
+	weights := []float64{4, 8, 8}
+	moves := []int{1, -1, 1}
+	target := []byte{20, 30}
+	const tau = 4.0
+	_, grad, _, err := lossAndWriteGrad(weights, moves, target, tau)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const eps = 1e-4
+	for i := range weights {
+		up := append([]float64(nil), weights...)
+		dn := append([]float64(nil), weights...)
+		up[i] += eps
+		dn[i] -= eps
+		lp, _, _, err := lossAndWriteGrad(up, moves, target, tau)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lm, _, _, err := lossAndWriteGrad(dn, moves, target, tau)
+		if err != nil {
+			t.Fatal(err)
+		}
+		diff := (lp - lm) / (2 * eps) * float64(len(target))
+		if math.Abs(grad[i]-diff) > 1e-4 {
+			t.Fatalf("weight %d partial %.6f finite difference %.6f", i, grad[i], diff)
+		}
 	}
 }
 
 func TestGaussLearnsHelloWorld(t *testing.T) {
 	err := learnGaussText(gaussLearnConfig{
 		Text:  "Hello World!",
+		Iters: 16,
+		Temp:  8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGaussLearnsHelloWorldBothWays(t *testing.T) {
+	// Eleven steps right reach cell 11. Eleven steps left return through
+	// cells 10..0. The last step does not write. Both directions occur,
+	// and every target cell is written at least once.
+	moves := "RRRRRRRRRRRLLLLLLLLLLLR"
+	parsed, err := parseMoves(moves, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	weights := make([]float64, len(parsed))
+	cells, _, err := runLearn(weights, parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < len("Hello World!"); i++ {
+		if cells[i] == nil || cells[i].n == 0 {
+			t.Fatalf("cell %d unvisited", i)
+		}
+	}
+	err = learnGaussText(gaussLearnConfig{
+		Text:  "Hello World!",
+		Moves: moves,
 		Iters: 16,
 		Temp:  8,
 	})
