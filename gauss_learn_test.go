@@ -48,7 +48,7 @@ func TestWriteGradientSharesTheMean(t *testing.T) {
 	weights := []float64{4, 8, 8}
 	moves := []int{1, -1, 1}
 	target := []byte{20, 30}
-	_, grad, tape, err := lossAndWriteGrad(weights, moves, target, 4)
+	_, grad, tape, err := lossAndWriteGrad(weights, moves, target, 4, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestWriteGradientSharesTheMean(t *testing.T) {
 	}
 	// A write on cell -1 is outside the target window.
 	off := []float64{6, 100}
-	_, grad, _, err = lossAndWriteGrad(off, []int{-1, 1}, []byte{20}, 4)
+	_, grad, _, err = lossAndWriteGrad(off, []int{-1, 1}, []byte{20}, 4, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestTwoWritePartialMatchesFiniteDifference(t *testing.T) {
 	moves := []int{1, -1, 1}
 	target := []byte{20, 30}
 	const tau = 4.0
-	_, grad, _, err := lossAndWriteGrad(weights, moves, target, tau)
+	_, grad, _, err := lossAndWriteGrad(weights, moves, target, tau, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,11 +90,11 @@ func TestTwoWritePartialMatchesFiniteDifference(t *testing.T) {
 		dn := append([]float64(nil), weights...)
 		up[i] += eps
 		dn[i] -= eps
-		lp, _, _, err := lossAndWriteGrad(up, moves, target, tau)
+		lp, _, _, err := lossAndWriteGrad(up, moves, target, tau, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		lm, _, _, err := lossAndWriteGrad(dn, moves, target, tau)
+		lm, _, _, err := lossAndWriteGrad(dn, moves, target, tau, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -110,14 +110,14 @@ func TestMoveTreePartialMatchesFiniteDifference(t *testing.T) {
 	logits := []float64{0.4, -0.2}
 	target := []byte{20, 30}
 	const tau = 4.0
-	_, writeGrad, moveGrad, _, _, err := treeLoss(weights, logits, target, tau)
+	_, writeGrad, moveGrad, _, _, err := treeLoss(weights, logits, target, tau, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	const eps = 1e-4
 	total := func(w, a []float64) float64 {
 		t.Helper()
-		mean, _, _, _, _, err := treeLoss(w, a, target, tau)
+		mean, _, _, _, _, err := treeLoss(w, a, target, tau, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -151,7 +151,7 @@ func TestMoveTreePartialMatchesFiniteDifference(t *testing.T) {
 func TestMoveTreeAtZeroHasNoDirectionPartial(t *testing.T) {
 	weights := []float64{0, 0}
 	logits := []float64{0, 0}
-	_, _, moveGrad, mode, _, err := treeLoss(weights, logits, []byte("AB"), 8)
+	_, _, moveGrad, mode, _, err := treeLoss(weights, logits, []byte("AB"), 8, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,10 +165,61 @@ func TestMoveTreeAtZeroHasNoDirectionPartial(t *testing.T) {
 	}
 }
 
+func TestTapeCellsRoundsTheFraction(t *testing.T) {
+	if tapeCells(12, 0.8) != 10 || tapeCells(16, 0.8) != 13 || tapeCells(2, 0.8) != 2 || tapeCells(1, 0.8) != 1 {
+		t.Fatalf("cells %d %d %d %d", tapeCells(12, 0.8), tapeCells(16, 0.8), tapeCells(2, 0.8), tapeCells(1, 0.8))
+	}
+}
+
+func TestWrappedWriteMatchesFiniteDifference(t *testing.T) {
+	// Three steps on two cells. Positions are 0, 1, 0. The third emission
+	// averages the first and third weights.
+	weights := []float64{4, 8, 6}
+	moves := []int{1, 1, 1}
+	target := []byte{20, 30, 40}
+	const tau = 4.0
+	const cells = 2
+	_, grad, tape, err := lossAndWriteGrad(weights, moves, target, tau, cells)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, d0 := symbolLoss(4, tau, 20)
+	_, d1 := symbolLoss(8, tau, 30)
+	_, d2 := symbolLoss(5, tau, 40)
+	want := []float64{d0 + d2/2, d1, d2 / 2}
+	for i := range want {
+		if math.Abs(grad[i]-want[i]) > 1e-9 {
+			t.Fatalf("grad %d %.6f want %.6f", i, grad[i], want[i])
+		}
+	}
+	if tape != string([]byte{nearestByte(4), nearestByte(8), nearestByte(5)}) {
+		t.Fatalf("tape %q", tape)
+	}
+	const eps = 1e-4
+	for i := range weights {
+		up := append([]float64(nil), weights...)
+		dn := append([]float64(nil), weights...)
+		up[i] += eps
+		dn[i] -= eps
+		lp, _, _, err := lossAndWriteGrad(up, moves, target, tau, cells)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lm, _, _, err := lossAndWriteGrad(dn, moves, target, tau, cells)
+		if err != nil {
+			t.Fatal(err)
+		}
+		diff := (lp - lm) / (2 * eps) * float64(len(target))
+		if math.Abs(grad[i]-diff) > 1e-3 {
+			t.Fatalf("weight %d partial %.6f finite difference %.6f", i, grad[i], diff)
+		}
+	}
+}
+
 func TestGaussLearnsHelloWorld(t *testing.T) {
 	err := learnGaussText(gaussLearnConfig{
 		Text:  "Hello World!",
-		Iters: 16,
+		Iters: 32,
 		Temp:  8,
 	})
 	if err != nil {
@@ -181,7 +232,7 @@ func TestOneUnrollRejectsMoreThanABlock(t *testing.T) {
 	weights := make([]float64, n)
 	logits := make([]float64, n)
 	target := make([]byte, n)
-	_, _, _, _, _, err := treeLoss(weights, logits, target, 8)
+	_, _, _, _, _, err := treeLoss(weights, logits, target, 8, 0)
 	if err == nil {
 		t.Fatal("expected one unroll to reject more than a block")
 	}
@@ -192,6 +243,7 @@ func TestGaussLearnsTextLongerThanOneBlock(t *testing.T) {
 	err := learnGaussText(gaussLearnConfig{
 		Text:  "Hello World! Again",
 		Iters: 16,
+		Size:  1,
 		Temp:  8,
 	})
 	if err != nil {
@@ -222,6 +274,7 @@ func TestGaussLearnsHelloWorldBothWays(t *testing.T) {
 		Text:  "Hello World!",
 		Moves: moves,
 		Iters: 16,
+		Size:  1,
 		Temp:  8,
 	})
 	if err != nil {

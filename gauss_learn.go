@@ -76,6 +76,17 @@ func parseMoves(s string, n int) ([]int, error) {
 	return out, nil
 }
 
+func movesFromMode(mode string) []int {
+	out := make([]int, len(mode))
+	for i, r := range mode {
+		out[i] = 1
+		if r == 'L' {
+			out[i] = -1
+		}
+	}
+	return out
+}
+
 func formatMoves(moves []int) string {
 	b := make([]byte, len(moves))
 	for i, m := range moves {
@@ -119,37 +130,15 @@ func runLearn(weights []float64, moves []int) (map[int]*gaussCell, map[int][]int
 }
 
 // lossAndWriteGrad returns the mean symbol cross-entropy, the partial of the
-// total loss with respect to each write weight, and the nearest-byte tape on
-// cells 0..len(target)-1. A cell written n times gives each of those weights
-// the share (1/n) ∂L/∂μ. A write outside that window has partial 0. An
-// unwritten target cell is read as mean 0 and sends no partial.
-func lossAndWriteGrad(weights []float64, moves []int, target []byte, tau float64) (float64, []float64, string, error) {
-	cells, writers, err := runLearn(weights, moves)
+// total loss with respect to each write weight, and the nearest-byte string.
+// cells <= 0 or cells >= len(target) reads finished cells 0..len(target)-1.
+// A shorter tape wraps, and each step emits the running mean on its cell.
+func lossAndWriteGrad(weights []float64, moves []int, target []byte, tau float64, cells int) (float64, []float64, string, error) {
+	sum, grad, tape, err := symbolPath(weights, moves, target, tau, cells)
 	if err != nil {
 		return 0, nil, "", err
 	}
-	grad := make([]float64, len(weights))
-	out := make([]byte, len(target))
-	loss := 0.0
-	for i, y := range target {
-		mu := 0.0
-		n := 0
-		if c := cells[i]; c != nil && c.n > 0 {
-			mu = c.mean
-			n = c.n
-		}
-		nll, dmu := symbolLoss(mu, tau, int(y))
-		loss += nll
-		out[i] = nearestByte(mu)
-		if n == 0 {
-			continue
-		}
-		share := dmu / float64(n)
-		for _, state := range writers[i] {
-			grad[state] += share
-		}
-	}
-	return loss / float64(len(target)), grad, string(out), nil
+	return sum / float64(len(target)), grad, tape, nil
 }
 
 // maxMoveUnroll is the deepest left/right tree expanded while learning moves.
@@ -163,13 +152,15 @@ const defaultMoveLR = 1
 // gaussLearnConfig trains write weights of a 256-symbol machine.
 // Moves is a string of L and R. Empty learns a move logit per state by
 // unrolling both branches. LR <= 0 uses Temp², which cancels the 1/τ² in
-// the symbol partial. MoveLR <= 0 uses defaultMoveLR.
+// the symbol partial. MoveLR <= 0 uses defaultMoveLR. Size <= 0 uses
+// defaultTapeSize.
 type gaussLearnConfig struct {
 	Text   string
 	Moves  string
 	Iters  int
 	LR     float64
 	MoveLR float64
+	Size   float64
 	Temp   float64
 	Log    func(string)
 }
@@ -179,7 +170,7 @@ func (cfg *gaussLearnConfig) apply() error {
 		return fmt.Errorf("text must be non-empty")
 	}
 	if cfg.Iters <= 0 {
-		cfg.Iters = 16
+		cfg.Iters = 32
 	}
 	if cfg.Temp <= 0 {
 		return fmt.Errorf("temperature must be positive")
@@ -190,6 +181,12 @@ func (cfg *gaussLearnConfig) apply() error {
 	if cfg.MoveLR <= 0 {
 		cfg.MoveLR = defaultMoveLR
 	}
+	if cfg.Size == 0 {
+		cfg.Size = defaultTapeSize
+	}
+	if cfg.Size <= 0 || cfg.Size > 1 {
+		return fmt.Errorf("tape size must be in (0, 1]")
+	}
 	return nil
 }
 
@@ -199,39 +196,147 @@ func (cfg gaussLearnConfig) logf(format string, args ...any) {
 	}
 }
 
-// pathSum is the total symbol cross-entropy of one root-to-leaf path, and it
-// adds that path's write partials, already multiplied by prob, into writeGrad.
-func pathSum(weights []float64, moves []int, target []byte, tau, prob float64, writeGrad []float64) float64 {
+func (cfg gaussLearnConfig) logTape(n int) {
+	cells := tapeCells(n, cfg.Size)
+	if cells < n {
+		cfg.logf("  the head wraps inside %d cells, and each symbol is the mean after that write", cells)
+	}
+}
+
+func (cfg gaussLearnConfig) logLoss(n int) {
+	if tapeCells(n, cfg.Size) < n {
+		cfg.logf("  the logged loss is the cross-entropy along the mode path")
+		cfg.logf("  writes follow that partial; move logits follow the expected loss over the tree")
+		return
+	}
+	cfg.logf("  loss is the expected cross-entropy over the move tree")
+	cfg.logf("  each step follows the partial of that loss through the writes and the move logits")
+}
+
+// defaultTapeSize is the tape length as a fraction of the symbols being learned.
+const defaultTapeSize = 0.8
+
+// tapeCells is the nearest integer to frac times n, at least 1 and at most n.
+func tapeCells(n int, frac float64) int {
+	if n < 1 {
+		return 0
+	}
+	c := int(math.Round(frac * float64(n)))
+	if c < 1 {
+		c = 1
+	}
+	if c > n {
+		c = n
+	}
+	return c
+}
+
+func wrapCell(head, cells int) int {
+	h := head % cells
+	if h < 0 {
+		h += cells
+	}
+	return h
+}
+
+// symbolPath is the total symbol cross-entropy of one path. When cells is
+// shorter than the target, the head wraps inside that tape and step i emits
+// the mean of the writes on its cell so far. Otherwise cells 0..len(target)-1
+// are read after every write, and a write outside that window has partial 0.
+func symbolPath(weights []float64, moves []int, target []byte, tau float64, cells int) (sum float64, grad []float64, tape string, err error) {
+	if len(weights) != len(moves) {
+		return 0, nil, "", fmt.Errorf("weights and moves differ in length")
+	}
+	if len(weights) == 0 {
+		return 0, nil, "", fmt.Errorf("moves must be non-empty")
+	}
+	for _, m := range moves {
+		if m != -1 && m != 1 {
+			return 0, nil, "", fmt.Errorf("move %d is not -1 or 1", m)
+		}
+	}
+	limited := cells > 0 && cells < len(target)
 	pos := make([]int, len(weights))
 	head := 0
-	for t := range weights {
-		pos[t] = head
-		head += moves[t]
+	for t, m := range moves {
+		if limited {
+			pos[t] = wrapCell(head, cells)
+			head = pos[t] + m
+		} else {
+			pos[t] = head
+			head += m
+		}
 	}
-	sum := 0.0
-	for i, y := range target {
+	grad = make([]float64, len(weights))
+	if !limited {
+		out := make([]byte, len(target))
+		for i, y := range target {
+			mu := 0.0
+			n := 0
+			for t := range pos {
+				if pos[t] == i {
+					mu += weights[t]
+					n++
+				}
+			}
+			if n > 0 {
+				mu /= float64(n)
+			}
+			nll, dmu := symbolLoss(mu, tau, int(y))
+			sum += nll
+			out[i] = nearestByte(mu)
+			if n == 0 {
+				continue
+			}
+			share := dmu / float64(n)
+			for t := range pos {
+				if pos[t] == i {
+					grad[t] += share
+				}
+			}
+		}
+		return sum, grad, string(out), nil
+	}
+	out := make([]byte, len(target))
+	steps := len(weights)
+	if steps > len(target) {
+		steps = len(target)
+	}
+	for i := 0; i < steps; i++ {
 		mu := 0.0
 		n := 0
-		for t := range pos {
-			if pos[t] == i {
+		for t := 0; t <= i; t++ {
+			if pos[t] == pos[i] {
 				mu += weights[t]
 				n++
 			}
 		}
-		if n > 0 {
-			mu /= float64(n)
-		}
-		nll, dmu := symbolLoss(mu, tau, int(y))
+		mu /= float64(n)
+		nll, dmu := symbolLoss(mu, tau, int(target[i]))
 		sum += nll
-		if n == 0 {
-			continue
-		}
-		share := prob * dmu / float64(n)
-		for t := range pos {
-			if pos[t] == i {
-				writeGrad[t] += share
+		out[i] = nearestByte(mu)
+		share := dmu / float64(n)
+		for t := 0; t <= i; t++ {
+			if pos[t] == pos[i] {
+				grad[t] += share
 			}
 		}
+	}
+	for i := steps; i < len(target); i++ {
+		nll, _ := symbolLoss(0, tau, int(target[i]))
+		sum += nll
+	}
+	return sum, grad, string(out), nil
+}
+
+// pathSum adds one path's write partials, multiplied by prob, into writeGrad.
+func pathSum(weights []float64, moves []int, target []byte, tau, prob float64, cells int, writeGrad []float64) float64 {
+	sum, grad, _, err := symbolPath(weights, moves, target, tau, cells)
+	if err != nil {
+		return 0
+	}
+	for i := range grad {
+		writeGrad[i] += prob * grad[i]
 	}
 	return sum
 }
@@ -242,7 +347,7 @@ func pathSum(weights []float64, moves []int, target []byte, tau, prob float64, w
 // write partial is the probability-weighted average of the path partials. The
 // move-logit partial at a step is (E[loss|right] - E[loss|left]) p (1-p).
 // The move after the last write does not change the tape, so its partial is 0.
-func treeLoss(weights, logits []float64, target []byte, tau float64) (mean float64, writeGrad, moveGrad []float64, mode string, tape string, err error) {
+func treeLoss(weights, logits []float64, target []byte, tau float64, cells int) (mean float64, writeGrad, moveGrad []float64, mode string, tape string, err error) {
 	if len(weights) != len(logits) || len(weights) == 0 {
 		return 0, nil, nil, "", "", fmt.Errorf("weights and move logits differ in length")
 	}
@@ -286,7 +391,7 @@ func treeLoss(weights, logits []float64, target []byte, tau float64) (mean float
 			continue
 		}
 		prob := math.Exp(logp)
-		total := pathSum(weights, moves, target, tau, prob, writeGrad)
+		total := pathSum(weights, moves, target, tau, prob, cells, writeGrad)
 		expect += prob * total
 		for t := 0; t < steps; t++ {
 			if moves[t] > 0 {
@@ -314,7 +419,7 @@ func treeLoss(weights, logits []float64, target []byte, tau float64) (mean float
 			modeMoves[t] = 1
 		}
 	}
-	_, _, tape, err = lossAndWriteGrad(weights, modeMoves, target, tau)
+	_, _, tape, err = lossAndWriteGrad(weights, modeMoves, target, tau, cells)
 	if err != nil {
 		return 0, nil, nil, "", "", err
 	}
@@ -343,23 +448,23 @@ func learnMoveTree(cfg gaussLearnConfig) error {
 	if len(target) <= maxMoveUnroll {
 		cfg.logf("256-symbol gaussian machine")
 		cfg.logf("  target %s", strconv.Quote(cfg.Text))
-		cfg.logf("  %d states, alphabet 256, both moves unrolled at every state", len(target))
-		cfg.logf("  loss is the expected cross-entropy over the move tree")
-		cfg.logf("  each step follows the partial of that loss through the writes and the move logits")
+		cfg.logf("  %d states, alphabet 256, tape cells %d, both moves unrolled at every state", len(target), tapeCells(len(target), cfg.Size))
+		cfg.logTape(len(target))
+		cfg.logLoss(len(target))
 		return trainMoveBlock(cfg, target, 0)
 	}
 	cfg.logf("256-symbol gaussian machine")
 	cfg.logf("  target %s", strconv.Quote(cfg.Text))
 	cfg.logf("  %d symbols, alphabet 256, blocks of %d", len(target), maxMoveUnroll)
 	cfg.logf("  each block unrolls both moves from its first symbol")
-	cfg.logf("  loss is the expected cross-entropy over that block's move tree")
-	cfg.logf("  each step follows the partial of that loss through the writes and the move logits")
+	cfg.logTape(maxMoveUnroll)
+	cfg.logLoss(maxMoveUnroll)
 	for start := 0; start < len(target); start += maxMoveUnroll {
 		end := start + maxMoveUnroll
 		if end > len(target) {
 			end = len(target)
 		}
-		cfg.logf("block [%d:%d]", start, end)
+		cfg.logf("block [%d:%d]  tape cells %d", start, end, tapeCells(end-start, cfg.Size))
 		if err := trainMoveBlock(cfg, target[start:end], start); err != nil {
 			return err
 		}
@@ -375,15 +480,25 @@ func trainMoveBlock(cfg gaussLearnConfig, target []byte, start int) error {
 	text := string(target)
 	weights := make([]float64, len(target))
 	logits := make([]float64, len(target))
+	cells := tapeCells(len(target), cfg.Size)
 	var loss float64
 	tape := ""
 	mode := ""
 	var err error
 	for iter := 0; iter <= cfg.Iters; iter++ {
 		var writeGrad, moveGrad []float64
-		loss, writeGrad, moveGrad, mode, tape, err = treeLoss(weights, logits, target, cfg.Temp)
+		loss, writeGrad, moveGrad, mode, tape, err = treeLoss(weights, logits, target, cfg.Temp, cells)
 		if err != nil {
 			return err
+		}
+		// On a short tape every path can retarget a cell, so a uniform mixture
+		// keeps the move partial near 0. Writes follow the mode path. Move
+		// logits still follow the expected loss over the tree.
+		if cells < len(target) {
+			loss, writeGrad, tape, err = lossAndWriteGrad(weights, movesFromMode(mode), target, cfg.Temp, cells)
+			if err != nil {
+				return err
+			}
 		}
 		sure := movesDecided(logits)
 		if iter == 0 || iter == cfg.Iters || iter%4 == 0 || (tape == text && sure) {
@@ -443,7 +558,8 @@ func learnGaussText(cfg gaussLearnConfig) error {
 	weights := make([]float64, len(moves))
 	cfg.logf("256-symbol gaussian machine")
 	cfg.logf("  target %s", strconv.Quote(cfg.Text))
-	cfg.logf("  %d states, alphabet 256, moves %s", len(moves), formatMoves(moves))
+	cfg.logf("  %d states, alphabet 256, tape cells %d, moves %s", len(moves), tapeCells(len(target), cfg.Size), formatMoves(moves))
+	cfg.logTape(len(target))
 	cfg.logf("  the head starts on cell 0, writes, then moves left or right")
 	cfg.logf("  loss is the cross-entropy of a Gaussian softmax over byte codes")
 	cfg.logf("  each step subtracts the learning rate times the partial of that loss")
@@ -451,7 +567,7 @@ func learnGaussText(cfg gaussLearnConfig) error {
 	tape := ""
 	for iter := 0; iter <= cfg.Iters; iter++ {
 		var grad []float64
-		loss, grad, tape, err = lossAndWriteGrad(weights, moves, target, cfg.Temp)
+		loss, grad, tape, err = lossAndWriteGrad(weights, moves, target, cfg.Temp, tapeCells(len(target), cfg.Size))
 		if err != nil {
 			return err
 		}

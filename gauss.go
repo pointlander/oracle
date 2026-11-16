@@ -427,7 +427,7 @@ func printGaussReport(log func(string), rep gaussReport) {
 func gaussFromArgs(args []string) error {
 	fs := flag.NewFlagSet("gauss", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: oracle gauss [flags]\n\nRun 2-symbol machines whose tape cells are Gaussians.\nA sample above 0 is symbol 1. Each write updates that cell's running mean and deviation.\nThe simulator is step-bounded.\n\nWith -text, train a 256-symbol machine so its tape spells that string.\nEach state writes one weight and then moves left or right.\nAn empty -moves learns those directions by unrolling both branches.\nLonger text is trained in successive blocks of 16 symbols.\nA non-empty -moves is a fixed string of L and R.\nThe loss is the cross-entropy of a Gaussian over the 256 byte codes.\nEach step follows the partial of that loss through the write weights and, when moves are learned, the move logits.\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: oracle gauss [flags]\n\nRun 2-symbol machines whose tape cells are Gaussians.\nA sample above 0 is symbol 1. Each write updates that cell's running mean and deviation.\nThe simulator is step-bounded.\n\nWith -text, train a 256-symbol machine so its tape spells that string.\nEach state writes one weight and then moves left or right.\nAn empty -moves learns those directions by unrolling both branches.\nLonger text is trained in successive blocks of 16 symbols.\n-size is the tape length as a fraction of those symbols. The default is 0.8.\nWhen the tape is shorter than the symbols, the head wraps, and each symbol is the cell mean after that step's write.\nA non-empty -moves is a fixed string of L and R.\nThe loss is the cross-entropy of a Gaussian over the 256 byte codes.\nEach step follows the partial of that loss through the write weights and, when moves are learned, the move logits.\n\n")
 		fs.PrintDefaults()
 	}
 	states := fs.Int("states", 0, "states in each machine; 0 runs 1 and 2")
@@ -438,9 +438,10 @@ func gaussFromArgs(args []string) error {
 	seed := fs.Int64("seed", 1, "seed")
 	text := fs.String("text", "", "train write weights so the tape spells this text")
 	moves := fs.String("moves", "", "fixed L and R moves when -text is set; empty learns both branches")
-	iters := fs.Int("iters", 16, "gradient steps when -text is set")
+	iters := fs.Int("iters", 32, "gradient steps when -text is set")
 	lr := fs.Float64("lr", 0, "write learning rate when -text is set; 0 uses the temperature squared")
 	moveLR := fs.Float64("move-lr", 0, "move-logit learning rate when -text learns moves; 0 uses 1")
+	size := fs.Float64("size", 0.8, "tape length as a fraction of the symbols being learned")
 	temp := fs.Float64("temp", 8, "symbol-softmax temperature when -text is set")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -453,7 +454,7 @@ func gaussFromArgs(args []string) error {
 	}
 	if *text != "" {
 		return learnGaussText(gaussLearnConfig{
-			Text: *text, Moves: *moves, Iters: *iters, LR: *lr, MoveLR: *moveLR, Temp: *temp, Log: log,
+			Text: *text, Moves: *moves, Iters: *iters, LR: *lr, MoveLR: *moveLR, Size: *size, Temp: *temp, Log: log,
 		})
 	}
 	if *states < 0 || *states > 2 {
