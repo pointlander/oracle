@@ -438,11 +438,110 @@ func formatProbs(logits []float64) string {
 	return string(b)
 }
 
+// discreteBit is the binary write of a learned weight. A positive weight
+// writes 1. Every other weight, including 0, writes 0.
+func discreteBit(w float64) byte {
+	if w > 0 {
+		return '1'
+	}
+	return '0'
+}
+
+// encodeDiscrete is the binary machine with one state per learned weight.
+// Both read symbols share that state's transition. The next state is the
+// following state, and the last state halts. A machine with no states, or
+// with more than 63, does not fit the 6-bit next-state field.
+func encodeDiscrete(weights []float64, moves []int) (string, bool) {
+	n := len(weights)
+	if n == 0 || n != len(moves) || n > 63 {
+		return "", false
+	}
+	mp := make(map[int][2]Transition, n)
+	for i := 0; i < n; i++ {
+		next := i + 2
+		if i == n-1 {
+			next = 0
+		}
+		tr := Transition{
+			WriteSymbol: discreteBit(weights[i]),
+			MoveDir:     moves[i],
+			NextState:   next,
+		}
+		mp[i+1] = [2]Transition{tr, tr}
+	}
+	return EncodeMachine(mp), true
+}
+
+// runDiscrete overwrites each cell with the sign of that state's weight.
+// writes is those bits in order. tape is the cells afterwards. A short tape
+// is cells 0..cells-1 and the head wraps. Otherwise the window is cells
+// 0..n-1 and a cell that was never written stays 0. Overwriting is not the
+// Gaussian running mean, so the final tape can differ from writes.
+func runDiscrete(weights []float64, moves []int, cells int) (writes, tape string) {
+	n := len(weights)
+	if n == 0 || n != len(moves) {
+		return "", ""
+	}
+	limited := cells > 0 && cells < n
+	width := n
+	if limited {
+		width = cells
+	}
+	cell := make([]byte, width)
+	for i := range cell {
+		cell[i] = '0'
+	}
+	bits := make([]byte, n)
+	head := 0
+	for t, w := range weights {
+		pos := head
+		if limited {
+			pos = wrapCell(head, cells)
+		}
+		bit := discreteBit(w)
+		bits[t] = bit
+		if limited || (pos >= 0 && pos < width) {
+			cell[pos] = bit
+		}
+		if limited {
+			head = pos + moves[t]
+		} else {
+			head += moves[t]
+		}
+	}
+	return string(bits), string(cell)
+}
+
+// logDiscrete prints the binary machine and returns its write bits.
+func (cfg gaussLearnConfig) logDiscrete(weights []float64, moves []int, cells int) string {
+	if len(weights) == 0 || len(weights) != len(moves) {
+		return ""
+	}
+	cfg.logf("discrete machine")
+	cfg.logf("  a positive write is 1 and every other write is 0")
+	shown := formatMoves(moves)
+	for i := range weights {
+		next := i + 2
+		if i == len(weights)-1 {
+			next = 0
+		}
+		cfg.logf("  state %d  write %c  move %c  next %d", i+1, discreteBit(weights[i]), shown[i], next)
+	}
+	if code, ok := encodeDiscrete(weights, moves); ok {
+		cfg.logf("  encoding %s", code)
+	}
+	writes, tape := runDiscrete(weights, moves, cells)
+	cfg.logf("  writes %s", writes)
+	cfg.logf("  tape %s", tape)
+	return writes
+}
+
 // learnMoveTree follows the partials of the expected loss through the unrolled
 // move tree. Text longer than one unroll is trained in successive blocks of
 // maxMoveUnroll symbols. Each block starts on its first symbol. The block
 // tapes are joined in order. The reported tape is the nearest-byte read along
-// each block's mode path.
+// each block's mode path. After a block matches, its weights convert to a
+// binary machine. Several blocks also join those write bits.
 func learnMoveTree(cfg gaussLearnConfig) error {
 	target := []byte(cfg.Text)
 	if len(target) <= maxMoveUnroll {
@@ -451,7 +550,8 @@ func learnMoveTree(cfg gaussLearnConfig) error {
 		cfg.logf("  %d states, alphabet 256, tape cells %d, both moves unrolled at every state", len(target), tapeCells(len(target), cfg.Size))
 		cfg.logTape(len(target))
 		cfg.logLoss(len(target))
-		return trainMoveBlock(cfg, target, 0)
+		_, err := trainMoveBlock(cfg, target, 0)
+		return err
 	}
 	cfg.logf("256-symbol gaussian machine")
 	cfg.logf("  target %s", strconv.Quote(cfg.Text))
@@ -459,24 +559,33 @@ func learnMoveTree(cfg gaussLearnConfig) error {
 	cfg.logf("  each block unrolls both moves from its first symbol")
 	cfg.logTape(maxMoveUnroll)
 	cfg.logLoss(maxMoveUnroll)
+	var joined []byte
+	blocks := 0
 	for start := 0; start < len(target); start += maxMoveUnroll {
 		end := start + maxMoveUnroll
 		if end > len(target) {
 			end = len(target)
 		}
 		cfg.logf("block [%d:%d]  tape cells %d", start, end, tapeCells(end-start, cfg.Size))
-		if err := trainMoveBlock(cfg, target[start:end], start); err != nil {
+		writes, err := trainMoveBlock(cfg, target[start:end], start)
+		if err != nil {
 			return err
 		}
+		joined = append(joined, writes...)
+		blocks++
 	}
 	cfg.logf("tape %s", strconv.Quote(cfg.Text))
+	if blocks > 1 {
+		cfg.logf("discrete writes %s", string(joined))
+	}
 	return nil
 }
 
 // trainMoveBlock learns one unroll. start is the block's index in the full
 // text and is used only in the error. Steps other than the last must put at
 // least probability 0.9 on the mode direction. The last move has partial 0.
-func trainMoveBlock(cfg gaussLearnConfig, target []byte, start int) error {
+// On a match it prints the binary machine and returns that machine's write bits.
+func trainMoveBlock(cfg gaussLearnConfig, target []byte, start int) (string, error) {
 	text := string(target)
 	weights := make([]float64, len(target))
 	logits := make([]float64, len(target))
@@ -489,7 +598,7 @@ func trainMoveBlock(cfg gaussLearnConfig, target []byte, start int) error {
 		var writeGrad, moveGrad []float64
 		loss, writeGrad, moveGrad, mode, tape, err = treeLoss(weights, logits, target, cfg.Temp, cells)
 		if err != nil {
-			return err
+			return "", err
 		}
 		// On a short tape every path can retarget a cell, so a uniform mixture
 		// keeps the move partial near 0. Writes follow the mode path. Move
@@ -497,7 +606,7 @@ func trainMoveBlock(cfg gaussLearnConfig, target []byte, start int) error {
 		if cells < len(target) {
 			loss, writeGrad, tape, err = lossAndWriteGrad(weights, movesFromMode(mode), target, cfg.Temp, cells)
 			if err != nil {
-				return err
+				return "", err
 			}
 		}
 		sure := movesDecided(logits)
@@ -505,7 +614,7 @@ func trainMoveBlock(cfg gaussLearnConfig, target []byte, start int) error {
 			cfg.logf("iter %d  loss %.6f  moves %s  p %s  tape %s", iter, loss, mode, formatProbs(logits), strconv.Quote(tape))
 		}
 		if tape == text && sure && iter > 0 {
-			return nil
+			return cfg.logDiscrete(weights, movesFromMode(mode), cells), nil
 		}
 		if iter == cfg.Iters {
 			break
@@ -521,7 +630,7 @@ func trainMoveBlock(cfg gaussLearnConfig, target []byte, start int) error {
 			}
 		}
 	}
-	return fmt.Errorf("block [%d:%d] tape %s moves %s after %d steps", start, start+len(target), strconv.Quote(tape), mode, cfg.Iters)
+	return "", fmt.Errorf("block [%d:%d] tape %s moves %s after %d steps", start, start+len(target), strconv.Quote(tape), mode, cfg.Iters)
 }
 
 // movesDecided reports whether every move except the last puts probability
@@ -542,7 +651,8 @@ func movesDecided(logits []float64) bool {
 
 // learnGaussText follows ∂L/∂write for the bytes of cfg.Text.
 // With no fixed moves, it also follows ∂L/∂move through the unrolled tree.
-// The learned tape is the nearest byte to each cell mean.
+// The learned tape is the nearest byte to each cell mean. After that tape
+// matches, the weights convert to a binary machine that writes 0 or 1.
 func learnGaussText(cfg gaussLearnConfig) error {
 	if err := cfg.apply(); err != nil {
 		return err
@@ -587,5 +697,6 @@ func learnGaussText(cfg gaussLearnConfig) error {
 	if tape != cfg.Text {
 		return fmt.Errorf("tape %s after %d steps", strconv.Quote(tape), cfg.Iters)
 	}
+	cfg.logDiscrete(weights, moves, tapeCells(len(target), cfg.Size))
 	return nil
 }

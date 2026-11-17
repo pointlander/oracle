@@ -6,6 +6,7 @@ package main
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -279,5 +280,60 @@ func TestGaussLearnsHelloWorldBothWays(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDiscreteWriteIsTheSign(t *testing.T) {
+	// Start on cell 0, write 1, step right, write 0, step left, write 0.
+	// The last write overwrites cell 0. Cell 2 is never written.
+	weights := []float64{1.5, 0, -0.2}
+	moves := []int{1, -1, 1}
+	writes, tape := runDiscrete(weights, moves, 0)
+	if writes != "100" || tape != "000" {
+		t.Fatalf("writes %s tape %s", writes, tape)
+	}
+	// Two cells. The third step wraps onto cell 0 and overwrites it.
+	writes, tape = runDiscrete([]float64{1.5, -1, 0.2}, []int{1, 1, 1}, 2)
+	if writes != "101" || tape != "10" {
+		t.Fatalf("wrapped writes %s tape %s", writes, tape)
+	}
+	code, ok := encodeDiscrete([]float64{1, -1}, []int{1, -1})
+	if !ok {
+		t.Fatal("encode")
+	}
+	want := "1100001011000010" + "0000000000000000"
+	if code != want {
+		t.Fatalf("encoding %s", code)
+	}
+	if got := (&UniversalBoundedSimulator{MaxSteps: 4}).HaltAt(code, ""); got != 2 {
+		t.Fatalf("halt %d", got)
+	}
+	if _, ok := encodeDiscrete(nil, nil); ok {
+		t.Fatal("empty machine")
+	}
+	if _, ok := encodeDiscrete([]float64{1}, nil); ok {
+		t.Fatal("length mismatch")
+	}
+	if _, ok := encodeDiscrete(make([]float64, 64), make([]int, 64)); ok {
+		t.Fatal("64 states must not fit")
+	}
+}
+
+func TestLearnedMachinePrintsDiscreteBits(t *testing.T) {
+	var lines []string
+	err := learnGaussText(gaussLearnConfig{
+		Text:  "A",
+		Moves: "R",
+		Iters: 8,
+		Size:  1,
+		Temp:  8,
+		Log:   func(s string) { lines = append(lines, s) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(lines, "\n")
+	if !strings.Contains(got, "discrete machine") || !strings.Contains(got, "writes 1") || !strings.Contains(got, "tape 1") {
+		t.Fatalf("log\n%s", got)
 	}
 }
