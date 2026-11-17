@@ -512,6 +512,209 @@ func runDiscrete(weights []float64, moves []int, cells int) (writes, tape string
 	return string(bits), string(cell)
 }
 
+// machineTable is the binary transition table. When the machine fits in the
+// 6-bit next-state field, the table is decoded from that encoding, so a run
+// tests the round trip. A longer machine uses the same rules directly.
+func machineTable(weights []float64, moves []int) map[int][2]Transition {
+	n := len(weights)
+	if n == 0 || n != len(moves) {
+		return nil
+	}
+	if code, ok := encodeDiscrete(weights, moves); ok {
+		if table := decodeMachine(code); table != nil {
+			return table
+		}
+	}
+	table := make(map[int][2]Transition, n)
+	for i := 0; i < n; i++ {
+		next := i + 2
+		if i == n-1 {
+			next = 0
+		}
+		tr := Transition{
+			WriteSymbol: discreteBit(weights[i]),
+			MoveDir:     moves[i],
+			NextState:   next,
+		}
+		table[i+1] = [2]Transition{tr, tr}
+	}
+	return table
+}
+
+// decodeMachine reads an encoding the way HaltAt does. A blank cell is '0'.
+// An empty or partial encoding does not decode.
+func decodeMachine(code string) map[int][2]Transition {
+	if len(code) == 0 || len(code)%16 != 0 {
+		return nil
+	}
+	numStates := len(code) / 16
+	table := make(map[int][2]Transition, numStates)
+	for s := 1; s <= numStates; s++ {
+		offset := (s - 1) * 16
+		t0, ok0 := decodeTransition(code[offset : offset+8])
+		t1, ok1 := decodeTransition(code[offset+8 : offset+16])
+		if !ok0 || !ok1 {
+			return nil
+		}
+		table[s] = [2]Transition{t0, t1}
+	}
+	return table
+}
+
+// discreteStates runs the binary machine on a blank tape and returns the
+// state at the start of each step. Both read symbols share a transition, so
+// the tape does not change the next state. State 0 is observed on the step
+// after the halt transition. The bound is one step past the last state.
+func discreteStates(weights []float64, moves []int) []int {
+	table := machineTable(weights, moves)
+	if table == nil {
+		return nil
+	}
+	return traceTransitions(table, len(weights)+1)
+}
+
+// traceTransitions follows HaltAt. State 0, or a state missing from the
+// table, stops the trace. A run that is still going at maxSteps returns the
+// states it reached. The bound is not a halting decider.
+func traceTransitions(table map[int][2]Transition, maxSteps int) []int {
+	tape := make(map[int]byte)
+	head := 0
+	state := 1
+	states := make([]int, 0, maxSteps)
+	for step := 0; step < maxSteps; step++ {
+		states = append(states, state)
+		if state == 0 {
+			return states
+		}
+		transitions, exists := table[state]
+		if !exists {
+			return states
+		}
+		current, cellExists := tape[head]
+		if !cellExists {
+			current = '0'
+		}
+		rule := transitions[1]
+		if current == '0' {
+			rule = transitions[0]
+		}
+		tape[head] = rule.WriteSymbol
+		head += rule.MoveDir
+		state = rule.NextState
+	}
+	return states
+}
+
+func formatStates(states []int) string {
+	b := make([]byte, 0, len(states)*3)
+	for i, s := range states {
+		if i > 0 {
+			b = append(b, ' ')
+		}
+		b = append(b, strconv.Itoa(s)...)
+	}
+	return string(b)
+}
+
+// emissionText is the nearest-byte string along this path. The loss target
+// does not change that read, so the target bytes are zeros.
+func emissionText(weights []float64, moves []int, cells int) string {
+	_, _, tape, err := symbolPath(weights, moves, make([]byte, len(weights)), 1, cells)
+	if err != nil {
+		return ""
+	}
+	return tape
+}
+
+// textMachine writes s as bits, one state per bit, moving right. The high
+// bit of each byte is written first. A positive weight is bit 1.
+func textMachine(s string) (weights []float64, moves []int) {
+	weights = make([]float64, len(s)*8)
+	moves = make([]int, len(s)*8)
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		for bit := 0; bit < 8; bit++ {
+			w := -1.0
+			if b&(1<<uint(7-bit)) != 0 {
+				w = 1
+			}
+			weights[i*8+bit] = w
+			moves[i*8+bit] = 1
+		}
+	}
+	return weights, moves
+}
+
+// writtenBits runs the decoded machine and reads cells 0..n-1 afterwards.
+// A cell that was never written is 0.
+func writtenBits(table map[int][2]Transition, n int) string {
+	tape := make(map[int]byte)
+	head := 0
+	state := 1
+	for step := 0; step < n && state != 0; step++ {
+		pair, ok := table[state]
+		if !ok {
+			break
+		}
+		current, exists := tape[head]
+		if !exists {
+			current = '0'
+		}
+		rule := pair[1]
+		if current == '0' {
+			rule = pair[0]
+		}
+		tape[head] = rule.WriteSymbol
+		head += rule.MoveDir
+		state = rule.NextState
+	}
+	bits := make([]byte, n)
+	for i := range bits {
+		b, ok := tape[i]
+		if !ok || (b != '0' && b != '1') {
+			b = '0'
+		}
+		bits[i] = b
+	}
+	return string(bits)
+}
+
+// textFromBits packs bits into bytes. The first bit of each group of eight
+// is the high bit. A length that is not a multiple of eight does not decode.
+func textFromBits(bits string) (string, bool) {
+	if len(bits) == 0 || len(bits)%8 != 0 {
+		return "", false
+	}
+	out := make([]byte, len(bits)/8)
+	for i := range out {
+		var b byte
+		for bit := 0; bit < 8; bit++ {
+			if bits[i*8+bit] == '1' {
+				b |= 1 << uint(7-bit)
+			}
+		}
+		out[i] = b
+	}
+	return string(out), true
+}
+
+// discreteText writes s as bits, runs that machine, and reads the tape back.
+func discreteText(s string) string {
+	if s == "" {
+		return ""
+	}
+	weights, moves := textMachine(s)
+	table := machineTable(weights, moves)
+	if table == nil {
+		return ""
+	}
+	text, ok := textFromBits(writtenBits(table, len(weights)))
+	if !ok {
+		return ""
+	}
+	return text
+}
+
 // logDiscrete prints the binary machine and returns its write bits.
 func (cfg gaussLearnConfig) logDiscrete(weights []float64, moves []int, cells int) string {
 	if len(weights) == 0 || len(weights) != len(moves) {
@@ -533,6 +736,13 @@ func (cfg gaussLearnConfig) logDiscrete(weights []float64, moves []int, cells in
 	writes, tape := runDiscrete(weights, moves, cells)
 	cfg.logf("  writes %s", writes)
 	cfg.logf("  tape %s", tape)
+	states := discreteStates(weights, moves)
+	cfg.logf("  states %s", formatStates(states))
+	if len(states) == len(weights)+1 && states[len(states)-1] != 0 {
+		cfg.logf("  still running")
+	}
+	cfg.logf("  the learned bytes are written as bits and read back")
+	cfg.logf("  text %s", strconv.Quote(discreteText(emissionText(weights, moves, cells))))
 	return writes
 }
 

@@ -308,6 +308,18 @@ func TestDiscreteWriteIsTheSign(t *testing.T) {
 	if got := (&UniversalBoundedSimulator{MaxSteps: 4}).HaltAt(code, ""); got != 2 {
 		t.Fatalf("halt %d", got)
 	}
+	states := discreteStates([]float64{1, -1}, []int{1, -1})
+	if formatStates(states) != "1 2 0" {
+		t.Fatalf("states %v", states)
+	}
+	states = discreteStates(weights, moves)
+	if formatStates(states) != "1 2 3 0" {
+		t.Fatalf("states %v", states)
+	}
+	long := discreteStates(make([]float64, 64), make([]int, 64))
+	if len(long) != 65 || long[0] != 1 || long[63] != 64 || long[64] != 0 {
+		t.Fatalf("long states %d", len(long))
+	}
 	if _, ok := encodeDiscrete(nil, nil); ok {
 		t.Fatal("empty machine")
 	}
@@ -333,7 +345,22 @@ func TestLearnedMachinePrintsDiscreteBits(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(lines, "\n")
-	if !strings.Contains(got, "discrete machine") || !strings.Contains(got, "writes 1") || !strings.Contains(got, "tape 1") {
+	if !strings.Contains(got, "discrete machine") || !strings.Contains(got, "writes 1") || !strings.Contains(got, "tape 1") || !strings.Contains(got, "states 1 0") || !strings.Contains(got, "text \"A\"") {
 		t.Fatalf("log\n%s", got)
+	}
+}
+
+func TestDiscreteTextRoundTrip(t *testing.T) {
+	// 7 bytes fit in the 6-bit encoding. 8 bytes do not, so both paths run.
+	for _, s := range []string{"Hello World!", "Abcdefg", "Abcdefgh"} {
+		if discreteText(s) != s {
+			t.Fatalf("text %q", s)
+		}
+	}
+	weights := []float64{72, 101, 108, 108, 111}
+	moves := []int{1, 1, 1, 1, 1}
+	got := discreteText(emissionText(weights, moves, 0))
+	if got != "Hello" {
+		t.Fatalf("emission %q", got)
 	}
 }
