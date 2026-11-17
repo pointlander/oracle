@@ -427,7 +427,7 @@ func printGaussReport(log func(string), rep gaussReport) {
 func gaussFromArgs(args []string) error {
 	fs := flag.NewFlagSet("gauss", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: oracle gauss [flags]\n\nRun 2-symbol machines whose tape cells are Gaussians.\nA sample above 0 is symbol 1. Each write updates that cell's running mean and deviation.\nThe simulator is step-bounded.\n\nWith -text, train a 256-symbol machine so its tape spells that string.\nEach state writes one weight and then moves left or right.\nAn empty -moves learns those directions by unrolling both branches.\nLonger text is trained in successive blocks of 16 symbols.\n-size is the tape length as a fraction of those symbols. The default is 0.8.\nWhen the tape is shorter than the symbols, the head wraps, and each symbol is the cell mean after that step's write.\nA non-empty -moves is a fixed string of L and R.\nThe loss is the cross-entropy of a Gaussian over the 256 byte codes.\nEach step follows the partial of that loss through the write weights and, when moves are learned, the move logits.\nAfter training, that machine converts to a binary Turing machine. A positive weight writes 1, and every other weight writes 0.\nThe machine is then run, and the states it visits are printed.\nThe learned text is written as bits and read back.\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: oracle gauss [flags]\n\nRun 2-symbol machines whose tape cells are Gaussians.\nA sample above 0 is symbol 1. Each write updates that cell's running mean and deviation.\nThe simulator is step-bounded.\n\nWith -text, train a 256-symbol machine so its tape spells that string.\nEach state writes one weight and then moves left or right.\nAn empty -moves learns those directions by unrolling both branches.\nLonger text is trained in successive blocks of 16 symbols.\n-size is the tape length as a fraction of those symbols. The default is 0.8.\nWhen the tape is shorter than the symbols, the head wraps, and each symbol is the cell mean after that step's write.\nA non-empty -moves is a fixed string of L and R.\nThe loss is the cross-entropy of a Gaussian over the 256 byte codes.\nEach step follows the partial of that loss through the write weights and, when moves are learned, the move logits.\nAfter training, that machine converts to a binary Turing machine. A positive weight writes 1, and every other weight writes 0.\nThe machine is then run, and the states it visits are printed.\nThe learned text is written as bits and read back.\n\nWith -iris, the machine classifies the flowers in that zip or data file.\nThe head scans the four measurements. Each state writes its weight times that measurement onto an output cell.\nThe output is a Gaussian softmax over the class symbols.\n\n")
 		fs.PrintDefaults()
 	}
 	states := fs.Int("states", 0, "states in each machine; 0 runs 1 and 2")
@@ -443,6 +443,7 @@ func gaussFromArgs(args []string) error {
 	moveLR := fs.Float64("move-lr", 0, "move-logit learning rate when -text learns moves; 0 uses 1")
 	size := fs.Float64("size", 0.8, "tape length as a fraction of the symbols being learned")
 	temp := fs.Float64("temp", 8, "symbol-softmax temperature when -text is set")
+	irisPath := fs.String("iris", "", "classify the iris zip or data file at this path")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -451,6 +452,12 @@ func gaussFromArgs(args []string) error {
 	}
 	log := func(msg string) {
 		fmt.Fprintln(os.Stdout, msg)
+	}
+	if *text != "" && *irisPath != "" {
+		return fmt.Errorf("-text and -iris cannot both be set")
+	}
+	if *irisPath != "" {
+		return learnIris(irisConfig{Path: *irisPath, Iters: *iters, Seed: *seed, Log: log})
 	}
 	if *text != "" {
 		return learnGaussText(gaussLearnConfig{
