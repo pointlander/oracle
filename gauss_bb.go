@@ -362,18 +362,27 @@ func (cfg bbConfig) logf(format string, args ...any) {
 	}
 }
 
-// learnBB starts at the busy beaver's halting state and follows the
+// learnBB learns BB(2) or BB(5) from the halting state.
+func learnBB(cfg bbConfig) error {
+	if cfg.Iters <= 0 {
+		cfg.Iters = 32
+	}
+	switch cfg.States {
+	case 2:
+		return learnBB2(cfg)
+	case 5:
+		return learnBB5(cfg)
+	default:
+		return fmt.Errorf("only BB(2) and BB(5) are learned")
+	}
+}
+
+// learnBB2 starts at the busy beaver's halting state and follows the
 // partial of that halt cost back to the initial state. The tape at that
 // initial state is all zeros. The logit starts at 0, an even chance of
 // state 1 or state 2. A probability of at least 0.9 selects the state,
 // and that state is run forward on the blank tape.
-func learnBB(cfg bbConfig) error {
-	if cfg.States != 2 {
-		return fmt.Errorf("only BB(2) is learned")
-	}
-	if cfg.Iters <= 0 {
-		cfg.Iters = 32
-	}
+func learnBB2(cfg bbConfig) error {
 	from1 := bbBranchFrom(1)
 	from2 := bbBranchFrom(2)
 	cfg.logf("gaussian BB(2)")
