@@ -34,9 +34,34 @@ func bb5Rules() [6][2]bbRule {
 	return t
 }
 
+// bb5NoHaltRules is the 5-state champion with the halt transition removed.
+// State 5 reading 0 writes 1, moves right, and stays in state 5. No rule
+// enters state 0, so the machine does not halt. The state chain still
+// identifies each step, because each pair of states is one rule.
+func bb5NoHaltRules() [6][2]bbRule {
+	t := bb5Rules()
+	t[5][0].next = 5
+	return t
+}
+
+// rulesEnterHalt reports whether any transition's next state is 0.
+func rulesEnterHalt(rules [6][2]bbRule) bool {
+	for s := 1; s <= 5; s++ {
+		for sym := 0; sym < 2; sym++ {
+			if rules[s][sym].next == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // bb5Transitions is bb5Rules in the simulator's binary encoding.
 func bb5Transitions() map[int][2]Transition {
-	rules := bb5Rules()
+	return bbRulesTransitions(bb5Rules())
+}
+
+func bbRulesTransitions(rules [6][2]bbRule) map[int][2]Transition {
 	m := make(map[int][2]Transition, 5)
 	for s := 1; s <= 5; s++ {
 		var pair [2]Transition
@@ -470,4 +495,97 @@ func learnBB5(cfg bbConfig) error {
 	}
 	cfg.logf("blank tape no")
 	return fmt.Errorf("BB(5) backward run did not reach a blank tape")
+}
+
+// learnBB5NoHalt runs the champion with no transition into halt. The forward
+// run stops at the step bound still going. Gradient descent fits that state's
+// chain and the Gaussian tape, and the guessed bits are run backward. A blank
+// tape rewinds the run. It is not a halting state. Starting the same walk in
+// state 0 does not reach a blank tape, because the machine never entered it.
+func learnBB5NoHalt(cfg bbConfig) error {
+	rules := bb5NoHaltRules()
+	if rulesEnterHalt(rules) {
+		return fmt.Errorf("BB(5) non-halting machine has a transition into state 0")
+	}
+	cfg.logf("gaussian BB(5)")
+	cfg.logf("  this machine does not halt")
+	cfg.logf("  the champion's halt rule stays in state 5")
+	cfg.logf("  no transition enters state 0")
+	cfg.logf("  backpropagation follows the state chain to the step bound")
+	cfg.logf("  the tape there is gaussian")
+	cfg.logf("  bits are guessed and the machine is run backward")
+	cfg.logf("  a blank tape rewinds that run")
+	cfg.logf("  it is not a halting state")
+	cfg.logf("running forward")
+	run := runRules(rules, bb5MaxSteps, func(steps int) {
+		cfg.logf("  forward step %d", steps)
+	})
+	if run.halted {
+		return fmt.Errorf("BB(5) non-halting machine entered state 0 at step %d", run.steps)
+	}
+	if run.steps != bb5MaxSteps {
+		return fmt.Errorf("BB(5) non-halting machine stopped at step %d", run.steps)
+	}
+	ones := run.tape.ones()
+	cells := 0
+	if run.tape.seen {
+		cells = run.tape.visHi - run.tape.visLo + 1
+	}
+	cfg.logf("still running at step %d", run.steps)
+	cfg.logf("state %d", run.state)
+	cfg.logf("ones %d", ones)
+	cfg.logf("cells %d", cells)
+	cfg.logf("head %d", run.head)
+
+	count := chainCounts(run.chain)
+	cfg.logf("state chain")
+	means, ok := fitChainStates(count, cfg.Iters, func(iter int, loss float64, means [6]float64) {
+		cfg.logf("chain iter %d  loss %.6f", iter, loss)
+		for s := 1; s <= 5; s++ {
+			if count[s] == 0 {
+				continue
+			}
+			cfg.logf("  state %d  mean %.4f  class %d  visits %d", s, means[s], classOf(means[s], 6), count[s])
+		}
+	})
+	if !ok {
+		return fmt.Errorf("BB(5) did not learn the state chain after %d steps", cfg.Iters)
+	}
+
+	learned := haltTapeFromSpan(run.tape)
+	cfg.logf("tape gaussians")
+	cfg.logf("  each visited cell is N(mean, 1)")
+	cfg.logf("  the probability is the mass above 0")
+	cfg.logf("  a sample above 0 reads as 1")
+	if _, err := cfg.fitGaussTape(learned); err != nil {
+		return err
+	}
+	n1, p1, n0, p0 := tapeProbSummary(learned)
+	cfg.logf("  1-cells %d  mean p %.4f", n1, p1)
+	cfg.logf("  0-cells %d  mean p %.4f", n0, p0)
+	if !guessesMatch(run.tape, learned) {
+		return fmt.Errorf("BB(5) gaussian guesses do not match the tape")
+	}
+	cfg.logf("guessed bits match")
+
+	guessed := guessTape(run.tape, learned)
+	cfg.logf("backward from state %d", run.state)
+	blank, back := bb5Undo(rules, guessed, run.head, run.chain, means, run.state)
+	cfg.logf("backward steps %d", back)
+	if blank {
+		cfg.logf("blank tape yes")
+	} else {
+		cfg.logf("blank tape no")
+		return fmt.Errorf("BB(5) non-halting run did not rewind to a blank tape")
+	}
+
+	cfg.logf("backward from the halting state")
+	haltBlank, haltBack := bb5Undo(rules, guessTape(run.tape, learned), run.head, run.chain, means, 0)
+	cfg.logf("backward steps %d", haltBack)
+	if haltBlank {
+		cfg.logf("blank tape yes")
+		return fmt.Errorf("BB(5) non-halting machine reached a blank tape from state 0")
+	}
+	cfg.logf("blank tape no")
+	return nil
 }

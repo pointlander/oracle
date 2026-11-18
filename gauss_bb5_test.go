@@ -171,6 +171,95 @@ func TestBB5GaussianTapeUndoesThePrefix(t *testing.T) {
 	}
 }
 
+func TestBB5NoHaltHasNoHaltRule(t *testing.T) {
+	rules := bb5NoHaltRules()
+	champ := bb5Rules()
+	if rulesEnterHalt(rules) {
+		t.Fatal("a rule enters state 0")
+	}
+	if !rulesEnterHalt(champ) {
+		t.Fatal("champion has no halt rule")
+	}
+	for s := 1; s <= 5; s++ {
+		for sym := 0; sym < 2; sym++ {
+			if s == 5 && sym == 0 {
+				if rules[s][sym].next != 5 || rules[s][sym].write != 1 || rules[s][sym].move != 1 {
+					t.Fatalf("halt rule %+v", rules[s][sym])
+				}
+				continue
+			}
+			if rules[s][sym] != champ[s][sym] {
+				t.Fatalf("state %d read %d changed", s, sym)
+			}
+		}
+	}
+	seen := map[[2]int]int{}
+	for s := 1; s <= 5; s++ {
+		for sym := 0; sym < 2; sym++ {
+			key := [2]int{s, rules[s][sym].next}
+			if _, ok := seen[key]; ok {
+				t.Fatalf("states %d to %d are two rules", s, rules[s][sym].next)
+			}
+			seen[key] = sym
+		}
+	}
+	code := EncodeMachine(bbRulesTransitions(rules))
+	if (&UniversalBoundedSimulator{MaxSteps: 64}).HaltAt(code, "") != -1 {
+		t.Fatalf("HaltAt halted %s", code)
+	}
+}
+
+func TestBB5NoHaltPrefixMatchesTheChampion(t *testing.T) {
+	// The removed rule is the transition into halt, which this prefix does
+	// not take. The two runs agree, and neither has halted.
+	got := runRules(bb5NoHaltRules(), 8, nil)
+	want := runBB5(8, nil)
+	if got.halted || want.halted || got.steps != 8 || got.head != want.head || got.state != want.state {
+		t.Fatalf("nohalt halted %v steps %d head %d state %d", got.halted, got.steps, got.head, got.state)
+	}
+	if len(got.chain) != len(want.chain) {
+		t.Fatalf("chain %v", got.chain)
+	}
+	for i := range want.chain {
+		if got.chain[i] != want.chain[i] {
+			t.Fatalf("chain %v", got.chain)
+		}
+	}
+	for _, cell := range []int{-1, 0, 1, 2, 3} {
+		if got.tape.get(cell) != want.tape.get(cell) {
+			t.Fatalf("cell %d %d", cell, got.tape.get(cell))
+		}
+	}
+}
+
+func TestBB5NoHaltRewindsButHaltStateDoesNot(t *testing.T) {
+	const n = 64
+	rules := bb5NoHaltRules()
+	run := runRules(rules, n, nil)
+	if run.halted || run.steps != n || run.state == 0 {
+		t.Fatalf("halted %v steps %d state %d", run.halted, run.steps, run.state)
+	}
+	means, ok := fitChainStates(chainCounts(run.chain), 32, nil)
+	if !ok {
+		t.Fatal("chain did not classify")
+	}
+	learned := haltTapeFromSpan(run.tape)
+	if _, err := (bbConfig{Iters: 32}).fitGaussTape(learned); err != nil {
+		t.Fatal(err)
+	}
+	if !guessesMatch(run.tape, learned) {
+		t.Fatal("guesses differ")
+	}
+	blank, steps := bb5Undo(rules, guessTape(run.tape, learned), run.head, run.chain, means, run.state)
+	if !blank || steps != n {
+		t.Fatalf("blank %v steps %d", blank, steps)
+	}
+	haltBlank, _ := bb5Undo(rules, guessTape(run.tape, learned), run.head, run.chain, means, 0)
+	if haltBlank {
+		t.Fatal("state 0 rewound a run that did not halt")
+	}
+}
+
 func TestBB5LearnedChainUndoesALongerPrefix(t *testing.T) {
 	const n = 4096
 	run := runBB5(n, nil)

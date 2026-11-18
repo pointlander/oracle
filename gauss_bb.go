@@ -353,6 +353,7 @@ func bbBackprop(logit float64) (loss, dlogit float64) {
 type bbConfig struct {
 	States int
 	Iters  int
+	NoHalt bool
 	Log    func(string)
 }
 
@@ -369,8 +370,14 @@ func learnBB(cfg bbConfig) error {
 	}
 	switch cfg.States {
 	case 2:
+		if cfg.NoHalt {
+			return fmt.Errorf("-no-halt is only for BB(5)")
+		}
 		return learnBB2(cfg)
 	case 5:
+		if cfg.NoHalt {
+			return learnBB5NoHalt(cfg)
+		}
 		return learnBB5(cfg)
 	default:
 		return fmt.Errorf("only BB(2) and BB(5) are learned")
