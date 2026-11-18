@@ -144,11 +144,14 @@ An empty `-moves` learns the direction at each state. The machine is unrolled in
 
 `-lm` trains a byte language model on that UTF-8 file. The default text for the rest of this program is `100.txt.utf-8`. The first 90% of the bytes are training and the last 10% are validation. The head reads the previous `-order` bytes. `-order` runs from 0 to 8 and defaults to 2. Contexts are stored sparsely, so an order above 2 keeps only the byte strings that occurred. Each context's write weight is trained, by the same Gaussian partial as a spelled string, on the most common next byte. The hard read is the nearest byte to that weight. An unseen context uses the longest suffix that was written. A sample is drawn from the bytes written in the context. The log gives the training and validation cross-entropy, the nearest-byte accuracy, and the unigram accuracy.
 
+`-bb 2` learns the 2-state busy beaver. Each of the four transitions learns a write weight, a move logit, and a next-state weight. The next state is a Gaussian softmax over 0, 1, and 2, and 0 is halt. The halting transition is state 2 reading 1. A blank cell is 0. After training, the hard machine is run on a blank tape. Halt is observed on the step after the transition into state 0.
+
 ```bash
 go run . gauss -text 'Hello World!' -size .8
 go run . gauss -text 'Hello World!' -moves RRRRRRRRRRRLLLLLLLLLLLR
 go run . gauss -iris iris.zip
 go run . gauss -lm 100.txt.utf-8
+go run . gauss -bb 2
 ```
 
 ## Tests
@@ -157,7 +160,7 @@ go run . gauss -lm 100.txt.utf-8
 go test
 ```
 
-The tests check the simulator, the machine encoding, gradients of the autograd ops, that a tiny model can reduce loss on a repeated string, that the oracle-off control and the halt-label task run, that the Huffman code round-trips and the genetic search raises next-bit accuracy, that a network passes halt bits along its tapes and sits at a fixed point when every machine ignores its tape, and that a symbol oracle emits the byte whose machine does not halt and a search over distinct programs learns a high-bit switch, and that a gaussian tape reads a positive sample as 1 and folds each write into a running mean and deviation, and that the partial of a symbol cross-entropy teaches a 256-symbol gaussian machine to write Hello World!, including when the head moves both left and right and when those directions are learned by unrolling both branches, including text longer than one block of 16, and that a tape of 0.8 of the symbols still spells the string, and that the learned machine converts to a binary machine whose writes are 0 or 1, and that running that machine prints the states it visits, and that the learned text round-trips through that tape, and that the same machine classifies held-out iris flowers, and that a Gaussian language model trained on Shakespeare beats a unigram on held-out bytes.
+The tests check the simulator, the machine encoding, gradients of the autograd ops, that a tiny model can reduce loss on a repeated string, that the oracle-off control and the halt-label task run, that the Huffman code round-trips and the genetic search raises next-bit accuracy, that a network passes halt bits along its tapes and sits at a fixed point when every machine ignores its tape, and that a symbol oracle emits the byte whose machine does not halt and a search over distinct programs learns a high-bit switch, and that a gaussian tape reads a positive sample as 1 and folds each write into a running mean and deviation, and that the partial of a symbol cross-entropy teaches a 256-symbol gaussian machine to write Hello World!, including when the head moves both left and right and when those directions are learned by unrolling both branches, including text longer than one block of 16, and that a tape of 0.8 of the symbols still spells the string, and that the learned machine converts to a binary machine whose writes are 0 or 1, and that running that machine prints the states it visits, and that the learned text round-trips through that tape, and that the same machine classifies held-out iris flowers, and that a Gaussian language model trained on Shakespeare beats a unigram on held-out bytes, and that the same machine learns the BB(2) halting state.
 
 ## License
 
