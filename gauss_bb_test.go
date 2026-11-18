@@ -16,7 +16,7 @@ func TestBB2HaltsAtSix(t *testing.T) {
 	if got := (&UniversalBoundedSimulator{MaxSteps: bbBound}).HaltAt(code, ""); got != 6 {
 		t.Fatalf("HaltAt %d encoding %s", got, code)
 	}
-	states, step, ones := bbScore(table, bbBound)
+	states, step, ones := bbScore(table, bbBound, 1)
 	if step != 6 || ones != 4 || formatStates(states) != "1 2 1 2 1 2 0" {
 		t.Fatalf("step %d ones %d states %s", step, ones, formatStates(states))
 	}
@@ -37,48 +37,46 @@ func TestBB2HaltsAtSix(t *testing.T) {
 	}
 }
 
-func TestBBHaltPartialMatchesFiniteDifference(t *testing.T) {
-	var p bbParams
-	p.next[2][1] = 0.3
-	p.write[2][1] = 0.4
-	p.move[2][1] = -0.2
-	_, dw, dm, dn := bbPartial(p)
-	const eps = 1e-4
-	partial := func(set func(*bbParams, float64), at float64) float64 {
-		up, down := p, p
-		set(&up, at+eps)
-		set(&down, at-eps)
-		mu, _, _, _ := bbPartial(up)
-		md, _, _, _ := bbPartial(down)
-		return (mu - md) / (2 * eps)
+func TestBB2State2HaltsEarlier(t *testing.T) {
+	// The same machine started in state 2 also reaches halt, on a zero
+	// tape, but not the busy beaver's halt. That gap is the gradient.
+	states, step, ones := bbScore(bb2Transitions(), bbBound, 2)
+	if step != 3 || ones != 2 || formatStates(states) != "2 1 2 0" {
+		t.Fatalf("step %d ones %d states %s", step, ones, formatStates(states))
 	}
-	if d := partial(func(q *bbParams, v float64) { q.next[2][1] = v }, p.next[2][1]); math.Abs(dn[2][1]-d) > 1e-6 {
-		t.Fatalf("halt next partial %.6f finite difference %.6f", dn[2][1], d)
-	}
-	if d := partial(func(q *bbParams, v float64) { q.write[2][1] = v }, p.write[2][1]); math.Abs(dw[2][1]-d) > 1e-6 {
-		t.Fatalf("halt write partial %.6f finite difference %.6f", dw[2][1], d)
-	}
-	if d := partial(func(q *bbParams, v float64) { q.move[2][1] = v }, p.move[2][1]); math.Abs(dm[2][1]-d) > 1e-6 {
-		t.Fatalf("halt move partial %.6f finite difference %.6f", dm[2][1], d)
-	}
-	// The halt target is 0 and this mean sits above 0, so the partial
-	// of the loss is positive and the step moves the mean down.
-	if dn[2][1] <= 0 {
-		t.Fatalf("halt partial %.6f", dn[2][1])
+	if c1, c2 := bbBranchFrom(1).cost, bbBranchFrom(2).cost; c1 != 0 || c2 <= c1 {
+		t.Fatalf("cost state1 %.4f state2 %.4f", c1, c2)
 	}
 }
 
-func TestGaussLearnsBB2Halt(t *testing.T) {
+func TestBBBackpropMatchesFiniteDifference(t *testing.T) {
+	const logit = 0.2
+	_, dlogit := bbBackprop(logit)
+	const eps = 1e-4
+	up, _ := bbBackprop(logit + eps)
+	down, _ := bbBackprop(logit - eps)
+	diff := (up - down) / (2 * eps)
+	if math.Abs(dlogit-diff) > 1e-6 {
+		t.Fatalf("partial %.6f finite difference %.6f", dlogit, diff)
+	}
+	// The halt cost of state 2 is higher, so the partial is negative and
+	// the step moves the logit toward state 1.
+	if dlogit >= 0 {
+		t.Fatalf("partial %.6f", dlogit)
+	}
+}
+
+func TestGaussLearnsBB2InitialState(t *testing.T) {
 	var lines []string
 	err := learnBB(bbConfig{States: 2, Iters: 32, Log: func(s string) { lines = append(lines, s) }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := strings.Join(lines, "\n")
-	if !strings.Contains(text, "halt step 6") || !strings.Contains(text, "ones 4") {
+	if !strings.Contains(text, "initial state 1") || !strings.Contains(text, "halt step 6") || !strings.Contains(text, "ones 4") {
 		t.Fatalf("log:\n%s", text)
 	}
-	if !strings.Contains(text, "state 2 read 1  write 1  move R  next 0") {
-		t.Fatalf("halting rule missing:\n%s", text)
+	if !strings.Contains(text, "states 1 2 1 2 1 2 0") {
+		t.Fatalf("forward run missing:\n%s", text)
 	}
 }
