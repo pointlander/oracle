@@ -66,6 +66,38 @@ func TestBBBackpropMatchesFiniteDifference(t *testing.T) {
 	}
 }
 
+func TestBBHaltTapeIsFourOnes(t *testing.T) {
+	idx, bits := bbWrittenTape(1)
+	if len(idx) != 4 || idx[0] != -2 || idx[1] != -1 || idx[2] != 0 || idx[3] != 1 {
+		t.Fatalf("cells %v", idx)
+	}
+	for _, b := range bits {
+		if b != 1 {
+			t.Fatalf("bits %v", bits)
+		}
+	}
+	cell := unitGaussCell(0)
+	if math.Abs(cell.dev()-1) > 1e-12 || math.Abs(gaussTailProb(0, 1)-0.5) > 1e-12 {
+		t.Fatalf("dev %.4f p %.4f", cell.dev(), gaussTailProb(0, 1))
+	}
+}
+
+func TestGaussTailNLLMatchesFiniteDifference(t *testing.T) {
+	const mu = 0.3
+	_, dmu := gaussTailNLL(mu, 1, 1)
+	const eps = 1e-5
+	up, _ := gaussTailNLL(mu+eps, 1, 1)
+	down, _ := gaussTailNLL(mu-eps, 1, 1)
+	diff := (up - down) / (2 * eps)
+	if math.Abs(dmu-diff) > 1e-6 {
+		t.Fatalf("partial %.6f finite difference %.6f", dmu, diff)
+	}
+	// The target bit is 1 and the mean is finite, so the step increases it.
+	if dmu >= 0 {
+		t.Fatalf("partial %.6f", dmu)
+	}
+}
+
 func TestGaussLearnsBB2InitialState(t *testing.T) {
 	var lines []string
 	err := learnBB(bbConfig{States: 2, Iters: 32, Log: func(s string) { lines = append(lines, s) }})
@@ -78,5 +110,17 @@ func TestGaussLearnsBB2InitialState(t *testing.T) {
 	}
 	if !strings.Contains(text, "states 1 2 1 2 1 2 0") {
 		t.Fatalf("forward run missing:\n%s", text)
+	}
+	for _, cell := range []string{"cell -2", "cell -1", "cell 0", "cell 1"} {
+		found := false
+		for _, line := range lines {
+			if strings.Contains(line, cell) && strings.Contains(line, "bit 1") && strings.Contains(line, "p 0.9") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("halting tape missing %s:\n%s", cell, text)
+		}
 	}
 }

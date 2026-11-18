@@ -4,7 +4,11 @@
 
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+	"sort"
+)
 
 // bbBound is the step limit used to read a run back. BB(2) halts at step 6,
 // inside this bound, so that observation is the halt itself. A run still
@@ -139,6 +143,198 @@ func bbBranchFrom(start int) bbBranch {
 	}
 }
 
+// gaussTailProb is the probability that a draw from N(mean, sigma^2) is
+// above 0. That draw reads as symbol 1. A zero width is a point mass, so
+// the probability is 0 or 1 and has no slope.
+func gaussTailProb(mean, sigma float64) float64 {
+	if sigma == 0 {
+		if mean > 0 {
+			return 1
+		}
+		return 0
+	}
+	z := mean / sigma
+	if z > 8 {
+		return 1
+	}
+	if z < -8 {
+		return 0
+	}
+	return 0.5 * math.Erfc(-z/math.Sqrt2)
+}
+
+// gaussTailNLL is the cross-entropy of a target bit under that probability,
+// and the partial with respect to the mean. sigma is held fixed.
+func gaussTailNLL(mean, sigma float64, bit int) (nll, dmu float64) {
+	p := gaussTailProb(mean, sigma)
+	if p < 1e-12 {
+		p = 1e-12
+	}
+	if p > 1-1e-12 {
+		p = 1 - 1e-12
+	}
+	dp := 0.0
+	if sigma != 0 {
+		z := mean / sigma
+		dp = math.Exp(-0.5*z*z) / (math.Sqrt(2*math.Pi) * sigma)
+	}
+	if bit == 1 {
+		nll = -math.Log(p)
+		dmu = -dp / p
+		return nll, dmu
+	}
+	nll = -math.Log(1 - p)
+	dmu = dp / (1 - p)
+	return nll, dmu
+}
+
+// unitGaussCell is N(mean, 1), the same width as a blank cell. Two
+// observations one unit apart have that mean and deviation.
+func unitGaussCell(mean float64) *gaussCell {
+	return &gaussCell{n: 2, mean: mean, m2: 2}
+}
+
+// bbWrittenTape is the tape at halt, cells in increasing order. A missing
+// cell was never written and stays the blank normal.
+func bbWrittenTape(start int) (idx []int, bits []int) {
+	table := bb2Transitions()
+	tape := make(map[int]byte)
+	head := 0
+	state := start
+	for step := 0; step < bbBound && state != 0; step++ {
+		pair, ok := table[state]
+		if !ok {
+			break
+		}
+		cur, exists := tape[head]
+		if !exists {
+			cur = '0'
+		}
+		rule := pair[1]
+		if cur == '0' {
+			rule = pair[0]
+		}
+		tape[head] = rule.WriteSymbol
+		head += rule.MoveDir
+		state = rule.NextState
+	}
+	for k := range tape {
+		idx = append(idx, k)
+	}
+	sort.Ints(idx)
+	bits = make([]int, len(idx))
+	for i, k := range idx {
+		if tape[k] == '1' {
+			bits[i] = 1
+		}
+	}
+	return idx, bits
+}
+
+// haltGauss is one written cell of the halting tape. The cell is N(mean, 1).
+// bit is the symbol the busy beaver left there.
+type haltGauss struct {
+	at   int
+	bit  int
+	cell *gaussCell
+}
+
+func newHaltTape(start int) []haltGauss {
+	idx, bits := bbWrittenTape(start)
+	tape := make([]haltGauss, len(idx))
+	for i := range idx {
+		tape[i] = haltGauss{at: idx[i], bit: bits[i], cell: unitGaussCell(0)}
+	}
+	return tape
+}
+
+// haltTapeLoss is the mean cross-entropy of the halting tape and the partial
+// of that mean with respect to each cell's mean.
+func haltTapeLoss(tape []haltGauss) (mean float64, dmu []float64) {
+	dmu = make([]float64, len(tape))
+	if len(tape) == 0 {
+		return 0, dmu
+	}
+	for i, cell := range tape {
+		sigma := cell.cell.dev()
+		nll, g := gaussTailNLL(cell.cell.mean, sigma, cell.bit)
+		mean += nll
+		dmu[i] = g
+	}
+	n := float64(len(tape))
+	mean /= n
+	for i := range dmu {
+		dmu[i] /= n
+	}
+	return mean, dmu
+}
+
+func haltTapeSure(tape []haltGauss) bool {
+	if len(tape) == 0 {
+		return false
+	}
+	for _, cell := range tape {
+		p := gaussTailProb(cell.cell.mean, cell.cell.dev())
+		if cell.bit == 1 {
+			if p < 0.9 || gaussBit(cell.cell.mean) != 1 {
+				return false
+			}
+		} else if p > 0.1 || gaussBit(cell.cell.mean) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (cfg bbConfig) logHaltTape(tape []haltGauss) {
+	for _, cell := range tape {
+		p := gaussTailProb(cell.cell.mean, cell.cell.dev())
+		cfg.logf("  cell %d  mean %.4f  p %.4f  bit %d", cell.at, cell.cell.mean, p, gaussBit(cell.cell.mean))
+	}
+}
+
+// learnHaltTape fits the Gaussian mean of each written cell. The probability
+// is the mass above 0. The step uses one cell's partial, so dividing the
+// logged mean back out cancels the 1/n. Means start at 0, which is a blank's
+// probability of 1/2.
+func (cfg bbConfig) learnHaltTape(start int) error {
+	tape := newHaltTape(start)
+	if len(tape) == 0 {
+		return fmt.Errorf("BB(2) halt tape is empty")
+	}
+	cfg.logf("halting tape gaussians")
+	cfg.logf("  each written cell is N(mean, 1)")
+	cfg.logf("  the probability is the mass above 0")
+	cfg.logf("  a sample above 0 reads as 1")
+	cfg.logf("  an unwritten cell stays N(0, 1), probability 0.5")
+	matched := -1
+	var loss float64
+	for iter := 0; iter <= cfg.Iters; iter++ {
+		var dmu []float64
+		loss, dmu = haltTapeLoss(tape)
+		sure := haltTapeSure(tape)
+		if iter == 0 || iter == cfg.Iters || iter%4 == 0 || (sure && iter > 0) {
+			cfg.logf("iter %d  loss %.6f", iter, loss)
+		}
+		if sure && iter > 0 {
+			matched = iter
+			break
+		}
+		if iter == cfg.Iters {
+			break
+		}
+		n := float64(len(tape))
+		for i := range tape {
+			tape[i].cell.mean -= dmu[i] * n
+		}
+	}
+	cfg.logHaltTape(tape)
+	if matched < 0 {
+		return fmt.Errorf("BB(2) did not learn the halting tape after %d steps", cfg.Iters)
+	}
+	return nil
+}
+
 // bbBackprop is the expected halt cost of an initial state on a blank tape,
 // and the partial of that cost with respect to the logit of starting in
 // state 1. The cost is computed at the halt of each branch. It is carried
@@ -233,5 +429,5 @@ func learnBB(cfg bbConfig) error {
 	if haltStep != bbHaltStep || ones != bbHaltOnes || len(states) == 0 || states[len(states)-1] != 0 {
 		return fmt.Errorf("initial state %d halted at step %d with %d ones", state, haltStep, ones)
 	}
-	return nil
+	return cfg.learnHaltTape(state)
 }
