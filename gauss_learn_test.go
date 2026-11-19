@@ -6,6 +6,7 @@ package main
 
 import (
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -240,7 +241,7 @@ func TestOneUnrollRejectsMoreThanABlock(t *testing.T) {
 }
 
 func TestGaussLearnsTextLongerThanOneBlock(t *testing.T) {
-	// 18 symbols: one full block of 16 and a second block of 2.
+	// 18 symbols stay one machine. The full move tree stops at 16.
 	err := learnGaussText(gaussLearnConfig{
 		Text:  "Hello World! Again",
 		Iters: 16,
@@ -283,87 +284,81 @@ func TestGaussLearnsHelloWorldBothWays(t *testing.T) {
 	}
 }
 
-func TestDiscreteWriteIsTheSign(t *testing.T) {
-	// Start on cell 0, write 1, step right, write 0, step left, write 0.
-	// The last write overwrites cell 0. Cell 2 is never written.
-	weights := []float64{1.5, 0, -0.2}
-	moves := []int{1, -1, 1}
-	writes, tape := runDiscrete(weights, moves, 0)
-	// The third step rereads the 1 on cell 0 and returns to the previous state.
-	if writes != "1010" || tape != "100" {
-		t.Fatalf("writes %s tape %s", writes, tape)
+func TestDiscreteWriteEmitsTheCharacter(t *testing.T) {
+	w0 := []float64{72, 101, 108}
+	w1 := []float64{33, 63, 88}
+	m0 := []int{1, 1, 1}
+	m1 := []int{-1, -1, -1}
+	writes, tape := runDiscrete(w0, w1, m0, m1, 0)
+	if writes != "Hel" || tape != "Hel" {
+		t.Fatalf("writes %q tape %q", writes, tape)
 	}
-	// Two cells. The third step wraps onto cell 0, reads the 1 there, and
-	// takes the other transition.
-	writes, tape = runDiscrete([]float64{1.5, -1, 0.2}, []int{1, 1, 1}, 2)
-	if writes != "1000" || tape != "00" {
-		t.Fatalf("wrapped writes %s tape %s", writes, tape)
+	// Two cells. The third step wraps onto cell 0, reads H, and takes rule 1.
+	writes, tape = runDiscrete(w0, w1, m0, []int{1, 1, -1}, 2)
+	if writes != "HeX?" || tape != "X?" {
+		t.Fatalf("wrapped writes %q tape %q", writes, tape)
 	}
-	code, ok := encodeDiscrete([]float64{1, -1}, []int{1, -1})
-	if !ok {
-		t.Fatal("encode")
+	table := machineTable(w0, w1, m0, m1)
+	if table[1][0].WriteSymbol != 'H' || table[1][1].WriteSymbol != '!' || table[1][0].MoveDir != 1 || table[1][1].MoveDir != -1 {
+		t.Fatalf("pair %+v %+v", table[1][0], table[1][1])
 	}
-	want := "1100001000000000" + "0000000011000001"
-	if code != want {
-		t.Fatalf("encoding %s", code)
-	}
-	table := machineTable([]float64{1, -1}, []int{1, -1})
 	if table[1][0].NextState == table[1][1].NextState || table[2][0].NextState == table[2][1].NextState {
 		t.Fatal("read 0 and read 1 go to the same state")
 	}
-	one := machineTable([]float64{1}, []int{1})
-	if one[1][0].NextState != 0 || one[1][1].NextState != 1 {
-		t.Fatalf("one state next %d %d", one[1][0].NextState, one[1][1].NextState)
+	one := machineTable([]float64{'A'}, []float64{'B'}, []int{1}, []int{-1})
+	if one[1][0].NextState != 0 || one[1][1].NextState != 1 || one[1][0].WriteSymbol != 'A' || one[1][1].WriteSymbol != 'B' {
+		t.Fatalf("one state %+v %+v", one[1][0], one[1][1])
 	}
-	if got := (&UniversalBoundedSimulator{MaxSteps: 4}).HaltAt(code, ""); got != 2 {
-		t.Fatalf("halt %d", got)
-	}
-	states := discreteStates([]float64{1, -1}, []int{1, -1})
-	if formatStates(states) != "1 2 0" {
+	states := discreteStates(w0, w1, m0, m1)
+	if formatStates(states) != "1 2 3 0" {
 		t.Fatalf("states %v", states)
 	}
-	states = discreteStates(weights, moves)
+	// Step back onto H. Rule 1 returns to the previous state.
+	states = discreteStates(w0, w1, []int{1, -1, 1}, []int{-1, 1, -1})
 	if formatStates(states) != "1 2 3 2" {
 		t.Fatalf("states %v", states)
 	}
-	long := discreteStates(make([]float64, 64), make([]int, 64))
+	zeros := make([]int, 64)
+	long := discreteStates(make([]float64, 64), make([]float64, 64), zeros, zeros)
 	if len(long) != 65 || long[0] != 1 || long[63] != 64 || long[64] != 0 {
 		t.Fatalf("long states %d", len(long))
 	}
-	if _, ok := encodeDiscrete(nil, nil); ok {
+	if machineTable(nil, nil, nil, nil) != nil {
 		t.Fatal("empty machine")
 	}
-	if _, ok := encodeDiscrete([]float64{1}, nil); ok {
+	if machineTable([]float64{1}, nil, []int{1}, []int{1}) != nil {
 		t.Fatal("length mismatch")
 	}
-	if _, ok := encodeDiscrete(make([]float64, 64), make([]int, 64)); ok {
-		t.Fatal("64 states must not fit")
+	if machineTable(make([]float64, 64), make([]float64, 64), zeros, zeros) == nil {
+		t.Fatal("64 states still run")
 	}
 }
 
 func TestLogDiscreteRunsTheConvertedMachine(t *testing.T) {
-	weights := []float64{1.5, 0, -0.2}
-	moves := []int{1, -1, 1}
+	w0 := []float64{72, 101, 108}
+	w1 := []float64{33, 63, 88}
+	m0 := []int{1, 1, 1}
+	m1 := []int{-1, -1, -1}
 	var lines []string
-	got := (gaussLearnConfig{Log: func(s string) { lines = append(lines, s) }}).logDiscrete(weights, moves, 0)
-	writes, tape := runDiscrete(weights, moves, 0)
-	if got != writes || got != "1010" {
-		t.Fatalf("writes %s", got)
+	cfg := gaussLearnConfig{Log: func(s string) { lines = append(lines, s) }}
+	got := cfg.logDiscrete(w0, w1, m0, m1, 0)
+	writes, tape := runDiscrete(w0, w1, m0, m1, 0)
+	if got != writes || got != "Hel" {
+		t.Fatalf("writes %q", got)
 	}
 	text := strings.Join(lines, "\n")
-	symbols := emissionText(weights, moves, 0)
-	states := formatStateChars(discreteStates(weights, moves), symbols)
-	if !strings.Contains(text, "writes "+writes) || !strings.Contains(text, "tape "+tape) || !strings.Contains(text, "states "+states) || strings.Contains(text, "states 1 ") {
+	states := formatStateChars(discreteStates(w0, w1, m0, m1), ruleSymbols(w0))
+	if !strings.Contains(text, "writes "+strconv.Quote(writes)) || !strings.Contains(text, "tape "+strconv.Quote(tape)) || !strings.Contains(text, "states "+states) || strings.Contains(text, "states 1 ") || !strings.Contains(text, "write 'H'") || !strings.Contains(text, "write '!'") {
 		t.Fatalf("log\n%s", text)
 	}
 	lines = nil
-	got = (gaussLearnConfig{Log: func(s string) { lines = append(lines, s) }}).logDiscrete([]float64{1.5, -1, 0.2}, []int{1, 1, 1}, 2)
-	if got != "1000" || !strings.Contains(strings.Join(lines, "\n"), "tape 00") {
-		t.Fatalf("wrapped writes %s\n%s", got, strings.Join(lines, "\n"))
+	got = cfg.logDiscrete(w0, w1, m0, []int{1, 1, -1}, 2)
+	if got != "HeX?" || !strings.Contains(strings.Join(lines, "\n"), "tape "+strconv.Quote("X?")) {
+		t.Fatalf("wrapped writes %q\n%s", got, strings.Join(lines, "\n"))
 	}
 }
 
-func TestLearnedMachinePrintsDiscreteBits(t *testing.T) {
+func TestLearnedMachinePrintsTheCharacter(t *testing.T) {
 	var lines []string
 	err := learnGaussText(gaussLearnConfig{
 		Text:  "A",
@@ -377,8 +372,132 @@ func TestLearnedMachinePrintsDiscreteBits(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(lines, "\n")
-	if !strings.Contains(got, "discrete machine") || !strings.Contains(got, "state 'A'") || !strings.Contains(got, "next '\\x00'") || !strings.Contains(got, "writes 1") || !strings.Contains(got, "tape 1") || !strings.Contains(got, "states \"A\\x00\"") || !strings.Contains(got, "text \"A\"") {
+	if !strings.Contains(got, "discrete machine") || !strings.Contains(got, "state 'A'") || !strings.Contains(got, "next '\\x00'") || !strings.Contains(got, "write 'A'") || !strings.Contains(got, "writes \"A\"") || !strings.Contains(got, "tape \"A\"") || !strings.Contains(got, "states \"A\\x00\"") || !strings.Contains(got, "text \"A\"") {
 		t.Fatalf("log\n%s", got)
+	}
+}
+
+func TestRuleWriteEmitsTheWeightOnARevisit(t *testing.T) {
+	// Three steps on two cells land on 0, 1, 0. The third step reads a
+	// non-zero byte and uses the read-1 weight. The emission is that weight.
+	w0 := []float64{4, 8, 0}
+	w1 := []float64{0, 0, 6}
+	moves := []int{1, 1, 1}
+	target := []byte{20, 30, 40}
+	const tau = 4.0
+	const cells = 2
+	_, g0, g1, tape, fired0, fired1, err := symbolPathRules(w0, w1, moves, moves, target, tau, cells)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, d0 := symbolLoss(4, tau, 20)
+	_, d1 := symbolLoss(8, tau, 30)
+	_, d2 := symbolLoss(6, tau, 40)
+	if math.Abs(g0[0]-d0) > 1e-9 || math.Abs(g0[1]-d1) > 1e-9 || g0[2] != 0 {
+		t.Fatalf("g0 %.6f %.6f %.6f", g0[0], g0[1], g0[2])
+	}
+	if g1[0] != 0 || g1[1] != 0 || math.Abs(g1[2]-d2) > 1e-9 {
+		t.Fatalf("g1 %.6f %.6f %.6f", g1[0], g1[1], g1[2])
+	}
+	if tape != string([]byte{nearestByte(4), nearestByte(8), nearestByte(6)}) {
+		t.Fatalf("tape %q", tape)
+	}
+	if !fired0[0] || !fired0[1] || fired0[2] || !fired1[2] {
+		t.Fatalf("fired %v %v", fired0, fired1)
+	}
+	const eps = 1e-4
+	total := func(a, b []float64) float64 {
+		t.Helper()
+		sum, _, _, _, _, _, err := symbolPathRules(a, b, moves, moves, target, tau, cells)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sum
+	}
+	for i := range w0 {
+		up := append([]float64(nil), w0...)
+		dn := append([]float64(nil), w0...)
+		up[i] += eps
+		dn[i] -= eps
+		diff := (total(up, w1) - total(dn, w1)) / (2 * eps)
+		if math.Abs(g0[i]-diff) > 1e-3 {
+			t.Fatalf("w0 %d partial %.6f finite difference %.6f", i, g0[i], diff)
+		}
+		up = append([]float64(nil), w1...)
+		dn = append([]float64(nil), w1...)
+		up[i] += eps
+		dn[i] -= eps
+		diff = (total(w0, up) - total(w0, dn)) / (2 * eps)
+		if math.Abs(g1[i]-diff) > 1e-3 {
+			t.Fatalf("w1 %d partial %.6f finite difference %.6f", i, g1[i], diff)
+		}
+	}
+}
+
+func TestMoveBranchAtZeroHasNoDirectionPartial(t *testing.T) {
+	_, _, _, dg0, dg1, mode, _, _, _, _, err := moveBranchLoss(
+		[]float64{0, 0}, []float64{0, 0}, []float64{0, 0}, []float64{0, 0}, []byte("AB"), 8, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != "RR" {
+		t.Fatalf("mode %s", mode)
+	}
+	for i := range dg0 {
+		if math.Abs(dg0[i]) > 1e-9 || math.Abs(dg1[i]) > 1e-9 {
+			t.Fatalf("move %d partial %.6f %.6f", i, dg0[i], dg1[i])
+		}
+	}
+}
+
+func TestMoveBranchFlipsOneUndecidedLogit(t *testing.T) {
+	w0 := []float64{10, 40}
+	w1 := []float64{0, 0}
+	a0 := []float64{0.2, 0.4}
+	a1 := []float64{0, 0}
+	target := []byte{10, 40}
+	const tau = 8.0
+	_, _, _, dg0, dg1, _, _, _, fired0, _, err := moveBranchLoss(w0, w1, a0, a1, target, tau, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fired0[0] || !fired0[1] {
+		t.Fatal("rule 0 should fire")
+	}
+	if math.Abs(dg0[1]) > 1e-12 {
+		t.Fatalf("last move partial %.6f", dg0[1])
+	}
+	if math.Abs(dg1[0]) > 1e-9 {
+		t.Fatalf("unread rule partial %.6f", dg1[0])
+	}
+	m0 := modeMoves(a0)
+	m1 := modeMoves(a1)
+	base, _, _, _, _, _, err := symbolPathRules(w0, w1, m0, m1, target, tau, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alt := append([]int(nil), m0...)
+	alt[0] = -m0[0]
+	flipped, _, _, _, _, _, err := symbolPathRules(w0, w1, alt, m1, target, tau, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := logistic(a0[0])
+	lRight, lLeft := base, flipped
+	if m0[0] < 0 {
+		lRight, lLeft = flipped, base
+	}
+	want := (lRight - lLeft) * p * (1 - p)
+	if math.Abs(dg0[0]-want) > 1e-6 {
+		t.Fatalf("partial %.6f want %.6f", dg0[0], want)
+	}
+	a0[0] = 5
+	_, _, _, dg0, _, _, _, _, _, _, err = moveBranchLoss(w0, w1, a0, a1, target, tau, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dg0[0] != 0 {
+		t.Fatalf("decided partial %.6f", dg0[0])
 	}
 }
 
