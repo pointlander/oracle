@@ -447,10 +447,44 @@ func discreteBit(w float64) byte {
 	return '0'
 }
 
+// discreteNext is the state a learned transition enters. Read 0 advances,
+// and the last state halts. Read 1 returns to the previous state, and the
+// first state halts. A one-state machine stays on a 1, so that entry is not
+// the halt entry.
+func discreteNext(state, n, read int) int {
+	if read == 0 {
+		if state >= n {
+			return 0
+		}
+		return state + 1
+	}
+	if n == 1 {
+		return 1
+	}
+	if state <= 1 {
+		return 0
+	}
+	return state - 1
+}
+
+// discretePair is the two transitions of one learned state. Read 0 writes
+// the sign of the weight and moves as learned. Read 1 writes the other bit
+// and moves the other way. The two entries go to different states.
+func discretePair(w float64, move, state, n int) [2]Transition {
+	bit := discreteBit(w)
+	other := byte('1')
+	if bit == '1' {
+		other = '0'
+	}
+	return [2]Transition{
+		{WriteSymbol: bit, MoveDir: move, NextState: discreteNext(state, n, 0)},
+		{WriteSymbol: other, MoveDir: -move, NextState: discreteNext(state, n, 1)},
+	}
+}
+
 // encodeDiscrete is the binary machine with one state per learned weight.
-// Both read symbols share that state's transition. The next state is the
-// following state, and the last state halts. A machine with no states, or
-// with more than 63, does not fit the 6-bit next-state field.
+// The 0 entry and the 1 entry go to different states. A machine with no
+// states, or with more than 63, does not fit the 6-bit next-state field.
 func encodeDiscrete(weights []float64, moves []int) (string, bool) {
 	n := len(weights)
 	if n == 0 || n != len(moves) || n > 63 {
@@ -458,58 +492,24 @@ func encodeDiscrete(weights []float64, moves []int) (string, bool) {
 	}
 	mp := make(map[int][2]Transition, n)
 	for i := 0; i < n; i++ {
-		next := i + 2
-		if i == n-1 {
-			next = 0
-		}
-		tr := Transition{
-			WriteSymbol: discreteBit(weights[i]),
-			MoveDir:     moves[i],
-			NextState:   next,
-		}
-		mp[i+1] = [2]Transition{tr, tr}
+		mp[i+1] = discretePair(weights[i], moves[i], i+1, n)
 	}
 	return EncodeMachine(mp), true
 }
 
-// runDiscrete overwrites each cell with the sign of that state's weight.
-// writes is those bits in order. tape is the cells afterwards. A short tape
-// is cells 0..cells-1 and the head wraps. Otherwise the window is cells
-// 0..n-1 and a cell that was never written stays 0. Overwriting is not the
-// Gaussian running mean, so the final tape can differ from writes.
+// runDiscrete runs the learned table. A 0 uses the sign, the learned move,
+// and the next state. A 1 uses the other bit, the other move, and the other
+// state. writes is those bits in order. tape is the cells afterwards. A
+// short tape is cells 0..cells-1 and the head wraps. Otherwise the window is
+// cells 0..n-1. A cell outside that window is still remembered, and a cell
+// that was never written stays 0.
 func runDiscrete(weights []float64, moves []int, cells int) (writes, tape string) {
 	n := len(weights)
 	if n == 0 || n != len(moves) {
 		return "", ""
 	}
-	limited := cells > 0 && cells < n
-	width := n
-	if limited {
-		width = cells
-	}
-	cell := make([]byte, width)
-	for i := range cell {
-		cell[i] = '0'
-	}
-	bits := make([]byte, n)
-	head := 0
-	for t, w := range weights {
-		pos := head
-		if limited {
-			pos = wrapCell(head, cells)
-		}
-		bit := discreteBit(w)
-		bits[t] = bit
-		if limited || (pos >= 0 && pos < width) {
-			cell[pos] = bit
-		}
-		if limited {
-			head = pos + moves[t]
-		} else {
-			head += moves[t]
-		}
-	}
-	return string(bits), string(cell)
+	writes, tape, _ = runConverted(machineTable(weights, moves), n, cells)
+	return writes, tape
 }
 
 // machineTable is the binary transition table. When the machine fits in the
@@ -527,16 +527,7 @@ func machineTable(weights []float64, moves []int) map[int][2]Transition {
 	}
 	table := make(map[int][2]Transition, n)
 	for i := 0; i < n; i++ {
-		next := i + 2
-		if i == n-1 {
-			next = 0
-		}
-		tr := Transition{
-			WriteSymbol: discreteBit(weights[i]),
-			MoveDir:     moves[i],
-			NextState:   next,
-		}
-		table[i+1] = [2]Transition{tr, tr}
+		table[i+1] = discretePair(weights[i], moves[i], i+1, n)
 	}
 	return table
 }
@@ -562,9 +553,9 @@ func decodeMachine(code string) map[int][2]Transition {
 }
 
 // discreteStates runs the binary machine on a blank tape and returns the
-// state at the start of each step. Both read symbols share a transition, so
-// the tape does not change the next state. State 0 is observed on the step
-// after the halt transition. The bound is one step past the last state.
+// state at the start of each step. A 1 sends the machine to a different
+// state from a 0. State 0 is observed on the step after the halt transition.
+// The bound is one step past the chain. A run still going there has not halted.
 func discreteStates(weights []float64, moves []int) []int {
 	table := machineTable(weights, moves)
 	if table == nil {
@@ -636,10 +627,11 @@ func recordSymbols(symbols string) string {
 	return string(buf)
 }
 
-// runConverted runs a discrete machine. cells limits the tape the way
-// runDiscrete does: a shorter tape wraps, and cells outside 0..n-1 are not
-// stored. writes is the symbol each transition wrote. states is the state at
-// the start of each step, including the halt state when the run enters it.
+// runConverted runs a discrete machine. A shorter tape wraps inside
+// cells 0..cells-1. Otherwise every write is remembered, and the reported
+// tape is cells 0..n-1. writes is the symbol each transition wrote. states
+// is the state at the start of each step, including the halt state when the
+// run enters it.
 func runConverted(table map[int][2]Transition, n, cells int) (writes, tape string, states []int) {
 	if table == nil || n < 1 {
 		return "", "", nil
@@ -649,10 +641,7 @@ func runConverted(table map[int][2]Transition, n, cells int) (writes, tape strin
 	if limited {
 		width = cells
 	}
-	cell := make([]byte, width)
-	for i := range cell {
-		cell[i] = '0'
-	}
+	mem := make(map[int]byte)
 	bits := make([]byte, 0, n)
 	head := 0
 	state := 1
@@ -671,24 +660,25 @@ func runConverted(table map[int][2]Transition, n, cells int) (writes, tape strin
 			pos = wrapCell(head, cells)
 		}
 		current := byte('0')
-		onTape := limited || (pos >= 0 && pos < width)
-		if onTape {
-			current = cell[pos]
+		if b, ok := mem[pos]; ok {
+			current = b
 		}
 		rule := transitions[1]
 		if current == '0' {
 			rule = transitions[0]
 		}
 		bits = append(bits, rule.WriteSymbol)
-		if onTape {
-			cell[pos] = rule.WriteSymbol
-		}
-		if limited {
-			head = pos + rule.MoveDir
-		} else {
-			head += rule.MoveDir
-		}
+		mem[pos] = rule.WriteSymbol
+		head = pos + rule.MoveDir
 		state = rule.NextState
+	}
+	cell := make([]byte, width)
+	for i := range cell {
+		b, ok := mem[i]
+		if !ok {
+			b = '0'
+		}
+		cell[i] = b
 	}
 	return string(bits), string(cell), states
 }
@@ -702,14 +692,17 @@ func (cfg gaussLearnConfig) logDiscrete(weights []float64, moves []int, cells in
 		return ""
 	}
 	cfg.logf("discrete machine")
-	cfg.logf("  a positive write is 1 and every other write is 0")
+	cfg.logf("  read 0 writes the sign, moves as learned, and goes to the next state")
+	cfg.logf("  read 1 writes the other bit, moves the other way, and goes to the previous state")
 	for s := 1; s <= len(weights); s++ {
-		tr := table[s][0]
-		move := byte('R')
-		if tr.MoveDir < 0 {
-			move = 'L'
+		for read := 0; read < 2; read++ {
+			tr := table[s][read]
+			move := byte('R')
+			if tr.MoveDir < 0 {
+				move = 'L'
+			}
+			cfg.logf("  state %d  read %d  write %c  move %c  next %d", s, read, tr.WriteSymbol, move, tr.NextState)
 		}
-		cfg.logf("  state %d  write %c  move %c  next %d", s, tr.WriteSymbol, move, tr.NextState)
 	}
 	writes, tape, states := runConverted(table, len(weights), cells)
 	cfg.logf("  writes %s", writes)

@@ -289,21 +289,31 @@ func TestDiscreteWriteIsTheSign(t *testing.T) {
 	weights := []float64{1.5, 0, -0.2}
 	moves := []int{1, -1, 1}
 	writes, tape := runDiscrete(weights, moves, 0)
-	if writes != "100" || tape != "000" {
+	// The third step rereads the 1 on cell 0 and returns to the previous state.
+	if writes != "1010" || tape != "100" {
 		t.Fatalf("writes %s tape %s", writes, tape)
 	}
-	// Two cells. The third step wraps onto cell 0 and overwrites it.
+	// Two cells. The third step wraps onto cell 0, reads the 1 there, and
+	// takes the other transition.
 	writes, tape = runDiscrete([]float64{1.5, -1, 0.2}, []int{1, 1, 1}, 2)
-	if writes != "101" || tape != "10" {
+	if writes != "1000" || tape != "00" {
 		t.Fatalf("wrapped writes %s tape %s", writes, tape)
 	}
 	code, ok := encodeDiscrete([]float64{1, -1}, []int{1, -1})
 	if !ok {
 		t.Fatal("encode")
 	}
-	want := "1100001011000010" + "0000000000000000"
+	want := "1100001000000000" + "0000000011000001"
 	if code != want {
 		t.Fatalf("encoding %s", code)
+	}
+	table := machineTable([]float64{1, -1}, []int{1, -1})
+	if table[1][0].NextState == table[1][1].NextState || table[2][0].NextState == table[2][1].NextState {
+		t.Fatal("read 0 and read 1 go to the same state")
+	}
+	one := machineTable([]float64{1}, []int{1})
+	if one[1][0].NextState != 0 || one[1][1].NextState != 1 {
+		t.Fatalf("one state next %d %d", one[1][0].NextState, one[1][1].NextState)
 	}
 	if got := (&UniversalBoundedSimulator{MaxSteps: 4}).HaltAt(code, ""); got != 2 {
 		t.Fatalf("halt %d", got)
@@ -313,7 +323,7 @@ func TestDiscreteWriteIsTheSign(t *testing.T) {
 		t.Fatalf("states %v", states)
 	}
 	states = discreteStates(weights, moves)
-	if formatStates(states) != "1 2 3 0" {
+	if formatStates(states) != "1 2 3 2" {
 		t.Fatalf("states %v", states)
 	}
 	long := discreteStates(make([]float64, 64), make([]int, 64))
@@ -337,7 +347,7 @@ func TestLogDiscreteRunsTheConvertedMachine(t *testing.T) {
 	var lines []string
 	got := (gaussLearnConfig{Log: func(s string) { lines = append(lines, s) }}).logDiscrete(weights, moves, 0)
 	writes, tape := runDiscrete(weights, moves, 0)
-	if got != writes || got != "100" {
+	if got != writes || got != "1010" {
 		t.Fatalf("writes %s", got)
 	}
 	text := strings.Join(lines, "\n")
@@ -347,7 +357,7 @@ func TestLogDiscreteRunsTheConvertedMachine(t *testing.T) {
 	}
 	lines = nil
 	got = (gaussLearnConfig{Log: func(s string) { lines = append(lines, s) }}).logDiscrete([]float64{1.5, -1, 0.2}, []int{1, 1, 1}, 2)
-	if got != "101" || !strings.Contains(strings.Join(lines, "\n"), "tape 10") {
+	if got != "1000" || !strings.Contains(strings.Join(lines, "\n"), "tape 00") {
 		t.Fatalf("wrapped writes %s\n%s", got, strings.Join(lines, "\n"))
 	}
 }
