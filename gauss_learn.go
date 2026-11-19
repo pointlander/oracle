@@ -719,7 +719,7 @@ func (cfg gaussLearnConfig) logDiscrete(weights []float64, moves []int, cells in
 // learnMoveTree follows the partials of the expected loss through the unrolled
 // move tree. Text longer than one unroll is trained in successive blocks of
 // maxMoveUnroll symbols. Each block starts on its first symbol. The block
-// tapes are joined in order. The reported tape is the nearest-byte read along
+// tapes are joined in order. The reported states are the nearest-byte read along
 // each block's mode path. After a block matches, its weights convert to a
 // binary machine. Several blocks also join those write bits.
 func learnMoveTree(cfg gaussLearnConfig) error {
@@ -754,7 +754,7 @@ func learnMoveTree(cfg gaussLearnConfig) error {
 		joined = append(joined, writes...)
 		blocks++
 	}
-	cfg.logf("tape %s", strconv.Quote(cfg.Text))
+	cfg.logf("states %s", strconv.Quote(cfg.Text))
 	if blocks > 1 {
 		cfg.logf("discrete writes %s", string(joined))
 	}
@@ -791,7 +791,7 @@ func trainMoveBlock(cfg gaussLearnConfig, target []byte, start int) (string, err
 		}
 		sure := movesDecided(logits)
 		if iter == 0 || iter == cfg.Iters || iter%4 == 0 || (tape == text && sure) {
-			cfg.logf("iter %d  loss %.6f  moves %s  p %s  tape %s", iter, loss, mode, formatProbs(logits), strconv.Quote(tape))
+			cfg.logf("iter %d  loss %.6f  moves %s  p %s  states %s", iter, loss, mode, formatProbs(logits), strconv.Quote(tape))
 		}
 		if tape == text && sure && iter > 0 {
 			return cfg.logDiscrete(weights, movesFromMode(mode), cells), nil
@@ -810,7 +810,7 @@ func trainMoveBlock(cfg gaussLearnConfig, target []byte, start int) (string, err
 			}
 		}
 	}
-	return "", fmt.Errorf("block [%d:%d] tape %s moves %s after %d steps", start, start+len(target), strconv.Quote(tape), mode, cfg.Iters)
+	return "", fmt.Errorf("block [%d:%d] states %s moves %s after %d steps", start, start+len(target), strconv.Quote(tape), mode, cfg.Iters)
 }
 
 // movesDecided reports whether every move except the last puts probability
@@ -862,7 +862,7 @@ func learnGaussText(cfg gaussLearnConfig) error {
 			return err
 		}
 		if iter == 0 || iter == cfg.Iters || iter%4 == 0 || tape == cfg.Text {
-			cfg.logf("iter %d  loss %.6f  tape %s", iter, loss, strconv.Quote(tape))
+			cfg.logf("iter %d  loss %.6f  states %s", iter, loss, strconv.Quote(tape))
 		}
 		if tape == cfg.Text && iter > 0 {
 			break
@@ -875,7 +875,7 @@ func learnGaussText(cfg gaussLearnConfig) error {
 		}
 	}
 	if tape != cfg.Text {
-		return fmt.Errorf("tape %s after %d steps", strconv.Quote(tape), cfg.Iters)
+		return fmt.Errorf("states %s after %d steps", strconv.Quote(tape), cfg.Iters)
 	}
 	cfg.logDiscrete(weights, moves, tapeCells(len(target), cfg.Size))
 	return nil
