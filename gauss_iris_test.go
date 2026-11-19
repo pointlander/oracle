@@ -31,7 +31,7 @@ func TestIrisWeightPartialMatchesFiniteDifference(t *testing.T) {
 	}}
 	w := [irisFeatures]float64{0.2, -0.3, 0.4, 0.1}
 	const b = -0.5
-	const tau = 0.5
+	const tau = irisTau
 	gw, gb, _ := irisGrad(w, b, rows, tau, 3)
 	const eps = 1e-4
 	up := w
@@ -49,6 +49,22 @@ func TestIrisWeightPartialMatchesFiniteDifference(t *testing.T) {
 	diff = (lp - lm) / (2 * eps)
 	if math.Abs(gb-diff) > 1e-4 {
 		t.Fatalf("bias partial %.6f finite difference %.6f", gb, diff)
+	}
+}
+
+func TestIrisLossIsTheTextSymbol(t *testing.T) {
+	rows := []irisRow{{y: 1}}
+	var w [irisFeatures]float64
+	_, _, loss := irisGrad(w, 0, rows, irisTau, 3)
+	nll, _ := symbolLoss(0, irisTau, irisClassByte(1, 3))
+	if math.Abs(loss-nll) > 1e-9 {
+		t.Fatalf("loss %.6f symbol %.6f", loss, nll)
+	}
+	if irisClassByte(0, 3) != 112 || irisClassByte(1, 3) != 128 || irisClassByte(2, 3) != 144 {
+		t.Fatalf("bytes %d %d %d", irisClassByte(0, 3), irisClassByte(1, 3), irisClassByte(2, 3))
+	}
+	if irisClassOf(128, 3) != 1 || irisClassOf(144, 3) != 2 || irisClassOf(120, 3) != 0 {
+		t.Fatalf("class of 128 %d", irisClassOf(128, 3))
 	}
 }
 

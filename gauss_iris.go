@@ -20,9 +20,15 @@ import (
 // scans one tape cell per measurement.
 const irisFeatures = 4
 
-// irisTau is the width of the class softmax. The three class symbols sit at
-// 0, 1, and 2, so a width of 0.5 keeps those symbols apart.
-const irisTau = 0.5
+// irisTau is the width of the text-machine symbol softmax. It matches the
+// default -temp of a spelled string.
+const irisTau = 8
+
+// irisByteCenter and irisByteGap place each class on a text byte. The bytes
+// sit in the middle of 0..255, sixteen apart, so the Gaussian is away from
+// either end and the decision boundaries have room between them.
+const irisByteCenter = 128
+const irisByteGap = 16
 
 // irisTestFrac is the fraction of each class held out. The split is
 // stratified and seeded.
@@ -36,6 +42,7 @@ type irisRow struct {
 type irisConfig struct {
 	Path  string
 	Iters int
+	Temp  float64
 	Seed  int64
 	Log   func(string)
 }
@@ -209,13 +216,44 @@ func standardizeIris(train, test []irisRow) {
 
 // scoreIris scans the four feature cells from the left. State i writes its
 // weight times that feature onto the output cell and moves right. A final
-// write adds the bias. The score is the sum of those writes.
+// write adds the bias. The score is that sum, and it is read as a text byte.
 func scoreIris(w [irisFeatures]float64, b float64, x [irisFeatures]float64) float64 {
 	out := b
 	for i := range x {
 		out += w[i] * x[i]
 	}
 	return out
+}
+
+// irisClassByte is the text symbol for a class. Class 0 sits at or just
+// below byte 128 and each next class is irisByteGap higher.
+func irisClassByte(y, nClass int) int {
+	if nClass < 2 {
+		nClass = 2
+	}
+	if y < 0 {
+		y = 0
+	}
+	if y >= nClass {
+		y = nClass - 1
+	}
+	return irisByteCenter + (y-(nClass-1)/2)*irisByteGap
+}
+
+// irisClassOf is the class whose text byte is nearest the output. An exact
+// tie picks the lower class.
+func irisClassOf(score float64, nClass int) int {
+	best := 0
+	bestD := math.Inf(1)
+	for c := 0; c < nClass; c++ {
+		d := float64(irisClassByte(c, nClass)) - score
+		d *= d
+		if d < bestD {
+			bestD = d
+			best = c
+		}
+	}
+	return best
 }
 
 // classLoss is the cross-entropy of a class symbol under a Gaussian softmax.
@@ -262,13 +300,14 @@ func classOf(mu float64, nClass int) int {
 	return best
 }
 
-// irisGrad is the mean class cross-entropy and the partial of that mean
-// with respect to each write weight and the bias.
+// irisGrad is the mean text-symbol cross-entropy and the partial of that
+// mean with respect to each write weight and the bias. The target is the
+// class byte, not the class index.
 func irisGrad(w [irisFeatures]float64, b float64, rows []irisRow, tau float64, nClass int) (gw [irisFeatures]float64, gb, loss float64) {
 	n := float64(len(rows))
 	for _, r := range rows {
 		mu := scoreIris(w, b, r.x)
-		nll, dmu := classLoss(mu, tau, r.y, nClass)
+		nll, dmu := symbolLoss(mu, tau, irisClassByte(r.y, nClass))
 		loss += nll
 		gb += dmu
 		for i := 0; i < irisFeatures; i++ {
@@ -286,21 +325,22 @@ func irisGrad(w [irisFeatures]float64, b float64, rows []irisRow, tau float64, n
 func irisCorrect(rows []irisRow, w [irisFeatures]float64, b float64, nClass int) int {
 	n := 0
 	for _, r := range rows {
-		if classOf(scoreIris(w, b, r.x), nClass) == r.y {
+		if irisClassOf(scoreIris(w, b, r.x), nClass) == r.y {
 			n++
 		}
 	}
 	return n
 }
 
-// fitIris follows the partial of the class cross-entropy through the scan.
-// A learning rate equal to τ^2 cancels the 1/τ^2 in that partial. Weights
-// start at 0.
+// fitIris follows the partial of the text-symbol cross-entropy through the
+// scan. The text trainer's full step is τ^2 times the partial, which moves
+// one write onto its byte. Flowers in one scan want different bytes, and
+// that full step overshoots, so this step is half of that. Weights start at 0.
 func fitIris(train, test []irisRow, nClass, iters int, tau float64, logf func(string, ...any)) (w [irisFeatures]float64, b float64, err error) {
 	if len(train) == 0 || nClass < 2 || tau <= 0 || iters < 0 {
 		return w, b, fmt.Errorf("iris fit needs training rows, two classes, and a positive temperature")
 	}
-	lr := tau * tau
+	lr := 0.5 * tau * tau
 	for iter := 0; iter <= iters; iter++ {
 		gw, gb, loss := irisGrad(w, b, train, tau, nClass)
 		tr := irisCorrect(train, w, b, nClass)
@@ -332,6 +372,9 @@ func learnIris(cfg irisConfig) error {
 		return err
 	}
 	standardizeIris(train, test)
+	if cfg.Temp <= 0 {
+		cfg.Temp = irisTau
+	}
 	cfg.logf("gaussian machine classifies iris")
 	cfg.logf("  file %s", cfg.Path)
 	cfg.logf("  %d flowers, %d features, %d classes", len(rows), irisFeatures, len(names))
@@ -340,8 +383,11 @@ func learnIris(cfg irisConfig) error {
 	cfg.logf("  the head scans the four feature cells from the left")
 	cfg.logf("  each state writes its weight times that feature onto the output cell")
 	cfg.logf("  the last write is a bias, and the output cell sums those writes")
-	cfg.logf("  loss is the cross-entropy of a Gaussian softmax over the class symbols")
-	w, b, err := fitIris(train, test, len(names), cfg.Iters, irisTau, cfg.logf)
+	cfg.logf("  loss is the text machine's Gaussian softmax over byte codes 0..255")
+	cfg.logf("  class bytes are %d apart around byte %d", irisByteGap, irisByteCenter)
+	cfg.logf("  the class is the byte nearest that sum")
+	cfg.logf("  the write step is half the temperature squared")
+	w, b, err := fitIris(train, test, len(names), cfg.Iters, cfg.Temp, cfg.logf)
 	if err != nil {
 		return err
 	}
@@ -353,11 +399,11 @@ func learnIris(cfg irisConfig) error {
 				continue
 			}
 			have++
-			if classOf(scoreIris(w, b, r.x), len(names)) == y {
+			if irisClassOf(scoreIris(w, b, r.x), len(names)) == y {
 				hit++
 			}
 		}
-		cfg.logf("  test %s  %d/%d", name, hit, have)
+		cfg.logf("  test %s  %d/%d  byte %d", name, hit, have, irisClassByte(y, len(names)))
 	}
 	return nil
 }
