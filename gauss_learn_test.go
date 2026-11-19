@@ -331,6 +331,27 @@ func TestDiscreteWriteIsTheSign(t *testing.T) {
 	}
 }
 
+func TestLogDiscreteRunsTheConvertedMachine(t *testing.T) {
+	weights := []float64{1.5, 0, -0.2}
+	moves := []int{1, -1, 1}
+	var lines []string
+	got := (gaussLearnConfig{Log: func(s string) { lines = append(lines, s) }}).logDiscrete(weights, moves, 0)
+	writes, tape := runDiscrete(weights, moves, 0)
+	if got != writes || got != "100" {
+		t.Fatalf("writes %s", got)
+	}
+	text := strings.Join(lines, "\n")
+	states := formatStates(discreteStates(weights, moves))
+	if !strings.Contains(text, "writes "+writes) || !strings.Contains(text, "tape "+tape) || !strings.Contains(text, "states "+states) {
+		t.Fatalf("log\n%s", text)
+	}
+	lines = nil
+	got = (gaussLearnConfig{Log: func(s string) { lines = append(lines, s) }}).logDiscrete([]float64{1.5, -1, 0.2}, []int{1, 1, 1}, 2)
+	if got != "101" || !strings.Contains(strings.Join(lines, "\n"), "tape 10") {
+		t.Fatalf("wrapped writes %s\n%s", got, strings.Join(lines, "\n"))
+	}
+}
+
 func TestLearnedMachinePrintsDiscreteBits(t *testing.T) {
 	var lines []string
 	err := learnGaussText(gaussLearnConfig{

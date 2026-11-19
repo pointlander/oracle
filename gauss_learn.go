@@ -636,25 +636,84 @@ func recordSymbols(symbols string) string {
 	return string(buf)
 }
 
-// logDiscrete prints the binary machine and returns its write bits.
+// runConverted runs a discrete machine. cells limits the tape the way
+// runDiscrete does: a shorter tape wraps, and cells outside 0..n-1 are not
+// stored. writes is the symbol each transition wrote. states is the state at
+// the start of each step, including the halt state when the run enters it.
+func runConverted(table map[int][2]Transition, n, cells int) (writes, tape string, states []int) {
+	if table == nil || n < 1 {
+		return "", "", nil
+	}
+	limited := cells > 0 && cells < n
+	width := n
+	if limited {
+		width = cells
+	}
+	cell := make([]byte, width)
+	for i := range cell {
+		cell[i] = '0'
+	}
+	bits := make([]byte, 0, n)
+	head := 0
+	state := 1
+	states = make([]int, 0, n+1)
+	for step := 0; step < n+1; step++ {
+		states = append(states, state)
+		if state == 0 {
+			break
+		}
+		transitions, ok := table[state]
+		if !ok {
+			break
+		}
+		pos := head
+		if limited {
+			pos = wrapCell(head, cells)
+		}
+		current := byte('0')
+		onTape := limited || (pos >= 0 && pos < width)
+		if onTape {
+			current = cell[pos]
+		}
+		rule := transitions[1]
+		if current == '0' {
+			rule = transitions[0]
+		}
+		bits = append(bits, rule.WriteSymbol)
+		if onTape {
+			cell[pos] = rule.WriteSymbol
+		}
+		if limited {
+			head = pos + rule.MoveDir
+		} else {
+			head += rule.MoveDir
+		}
+		state = rule.NextState
+	}
+	return string(bits), string(cell), states
+}
+
+// logDiscrete converts the learned weights to a discrete machine and runs
+// that machine. The symbol bytes are recorded in a buffer and are not written
+// on the tape.
 func (cfg gaussLearnConfig) logDiscrete(weights []float64, moves []int, cells int) string {
-	if len(weights) == 0 || len(weights) != len(moves) {
+	table := machineTable(weights, moves)
+	if table == nil {
 		return ""
 	}
 	cfg.logf("discrete machine")
 	cfg.logf("  a positive write is 1 and every other write is 0")
-	shown := formatMoves(moves)
-	for i := range weights {
-		next := i + 2
-		if i == len(weights)-1 {
-			next = 0
+	for s := 1; s <= len(weights); s++ {
+		tr := table[s][0]
+		move := byte('R')
+		if tr.MoveDir < 0 {
+			move = 'L'
 		}
-		cfg.logf("  state %d  write %c  move %c  next %d", i+1, discreteBit(weights[i]), shown[i], next)
+		cfg.logf("  state %d  write %c  move %c  next %d", s, tr.WriteSymbol, move, tr.NextState)
 	}
-	writes, tape := runDiscrete(weights, moves, cells)
+	writes, tape, states := runConverted(table, len(weights), cells)
 	cfg.logf("  writes %s", writes)
 	cfg.logf("  tape %s", tape)
-	states := discreteStates(weights, moves)
 	cfg.logf("  states %s", formatStates(states))
 	if len(states) == len(weights)+1 && states[len(states)-1] != 0 {
 		cfg.logf("  still running")
