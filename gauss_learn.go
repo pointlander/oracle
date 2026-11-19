@@ -607,6 +607,27 @@ func formatStates(states []int) string {
 	return string(b)
 }
 
+// formatStateChar is one learned state. The state is that symbol. State 0
+// has no symbol, so it is a zero byte.
+func formatStateChar(symbols string, state int) string {
+	if state >= 1 && state <= len(symbols) {
+		return strconv.QuoteRune(rune(symbols[state-1]))
+	}
+	return strconv.QuoteRune(0)
+}
+
+// formatStateChars prints each visited state as its learned symbol. State 0
+// has no symbol, so it is a zero byte. The result is quoted.
+func formatStateChars(states []int, symbols string) string {
+	buf := make([]byte, len(states))
+	for i, s := range states {
+		if s >= 1 && s <= len(symbols) {
+			buf[i] = symbols[s-1]
+		}
+	}
+	return strconv.Quote(string(buf))
+}
+
 // emissionText is the nearest-byte string along this path. The loss target
 // does not change that read, so the target bytes are zeros.
 func emissionText(weights []float64, moves []int, cells int) string {
@@ -691,9 +712,11 @@ func (cfg gaussLearnConfig) logDiscrete(weights []float64, moves []int, cells in
 	if table == nil {
 		return ""
 	}
+	symbols := recordSymbols(emissionText(weights, moves, cells))
 	cfg.logf("discrete machine")
-	cfg.logf("  read 0 writes the sign, moves as learned, and goes to the next state")
-	cfg.logf("  read 1 writes the other bit, moves the other way, and goes to the previous state")
+	cfg.logf("  a state is its learned character")
+	cfg.logf("  read 0 writes the sign, moves as learned, and goes to the next character")
+	cfg.logf("  read 1 writes the other bit, moves the other way, and goes to the previous character")
 	for s := 1; s <= len(weights); s++ {
 		for read := 0; read < 2; read++ {
 			tr := table[s][read]
@@ -701,18 +724,18 @@ func (cfg gaussLearnConfig) logDiscrete(weights []float64, moves []int, cells in
 			if tr.MoveDir < 0 {
 				move = 'L'
 			}
-			cfg.logf("  state %d  read %d  write %c  move %c  next %d", s, read, tr.WriteSymbol, move, tr.NextState)
+			cfg.logf("  state %s  read %d  write %c  move %c  next %s", formatStateChar(symbols, s), read, tr.WriteSymbol, move, formatStateChar(symbols, tr.NextState))
 		}
 	}
 	writes, tape, states := runConverted(table, len(weights), cells)
 	cfg.logf("  writes %s", writes)
 	cfg.logf("  tape %s", tape)
-	cfg.logf("  states %s", formatStates(states))
+	cfg.logf("  states %s", formatStateChars(states, symbols))
 	if len(states) == len(weights)+1 && states[len(states)-1] != 0 {
 		cfg.logf("  still running")
 	}
 	cfg.logf("  the learned symbol bytes are recorded in a buffer")
-	cfg.logf("  text %s", strconv.Quote(recordSymbols(emissionText(weights, moves, cells))))
+	cfg.logf("  text %s", strconv.Quote(symbols))
 	return writes
 }
 

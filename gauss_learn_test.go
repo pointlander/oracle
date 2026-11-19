@@ -351,8 +351,9 @@ func TestLogDiscreteRunsTheConvertedMachine(t *testing.T) {
 		t.Fatalf("writes %s", got)
 	}
 	text := strings.Join(lines, "\n")
-	states := formatStates(discreteStates(weights, moves))
-	if !strings.Contains(text, "writes "+writes) || !strings.Contains(text, "tape "+tape) || !strings.Contains(text, "states "+states) {
+	symbols := emissionText(weights, moves, 0)
+	states := formatStateChars(discreteStates(weights, moves), symbols)
+	if !strings.Contains(text, "writes "+writes) || !strings.Contains(text, "tape "+tape) || !strings.Contains(text, "states "+states) || strings.Contains(text, "states 1 ") {
 		t.Fatalf("log\n%s", text)
 	}
 	lines = nil
@@ -376,7 +377,7 @@ func TestLearnedMachinePrintsDiscreteBits(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(lines, "\n")
-	if !strings.Contains(got, "discrete machine") || !strings.Contains(got, "writes 1") || !strings.Contains(got, "tape 1") || !strings.Contains(got, "states 1 0") || !strings.Contains(got, "text \"A\"") {
+	if !strings.Contains(got, "discrete machine") || !strings.Contains(got, "state 'A'") || !strings.Contains(got, "next '\\x00'") || !strings.Contains(got, "writes 1") || !strings.Contains(got, "tape 1") || !strings.Contains(got, "states \"A\\x00\"") || !strings.Contains(got, "text \"A\"") {
 		t.Fatalf("log\n%s", got)
 	}
 }
