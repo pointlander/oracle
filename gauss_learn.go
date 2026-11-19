@@ -626,93 +626,14 @@ func emissionText(weights []float64, moves []int, cells int) string {
 	return tape
 }
 
-// textMachine writes s as bits, one state per bit, moving right. The high
-// bit of each byte is written first. A positive weight is bit 1.
-func textMachine(s string) (weights []float64, moves []int) {
-	weights = make([]float64, len(s)*8)
-	moves = make([]int, len(s)*8)
-	for i := 0; i < len(s); i++ {
-		b := s[i]
-		for bit := 0; bit < 8; bit++ {
-			w := -1.0
-			if b&(1<<uint(7-bit)) != 0 {
-				w = 1
-			}
-			weights[i*8+bit] = w
-			moves[i*8+bit] = 1
-		}
+// recordSymbols saves each symbol byte in a buffer. The bytes are not written
+// on a tape.
+func recordSymbols(symbols string) string {
+	buf := make([]byte, 0, len(symbols))
+	for i := 0; i < len(symbols); i++ {
+		buf = append(buf, symbols[i])
 	}
-	return weights, moves
-}
-
-// writtenBits runs the decoded machine and reads cells 0..n-1 afterwards.
-// A cell that was never written is 0.
-func writtenBits(table map[int][2]Transition, n int) string {
-	tape := make(map[int]byte)
-	head := 0
-	state := 1
-	for step := 0; step < n && state != 0; step++ {
-		pair, ok := table[state]
-		if !ok {
-			break
-		}
-		current, exists := tape[head]
-		if !exists {
-			current = '0'
-		}
-		rule := pair[1]
-		if current == '0' {
-			rule = pair[0]
-		}
-		tape[head] = rule.WriteSymbol
-		head += rule.MoveDir
-		state = rule.NextState
-	}
-	bits := make([]byte, n)
-	for i := range bits {
-		b, ok := tape[i]
-		if !ok || (b != '0' && b != '1') {
-			b = '0'
-		}
-		bits[i] = b
-	}
-	return string(bits)
-}
-
-// textFromBits packs bits into bytes. The first bit of each group of eight
-// is the high bit. A length that is not a multiple of eight does not decode.
-func textFromBits(bits string) (string, bool) {
-	if len(bits) == 0 || len(bits)%8 != 0 {
-		return "", false
-	}
-	out := make([]byte, len(bits)/8)
-	for i := range out {
-		var b byte
-		for bit := 0; bit < 8; bit++ {
-			if bits[i*8+bit] == '1' {
-				b |= 1 << uint(7-bit)
-			}
-		}
-		out[i] = b
-	}
-	return string(out), true
-}
-
-// discreteText writes s as bits, runs that machine, and reads the tape back.
-func discreteText(s string) string {
-	if s == "" {
-		return ""
-	}
-	weights, moves := textMachine(s)
-	table := machineTable(weights, moves)
-	if table == nil {
-		return ""
-	}
-	text, ok := textFromBits(writtenBits(table, len(weights)))
-	if !ok {
-		return ""
-	}
-	return text
+	return string(buf)
 }
 
 // logDiscrete prints the binary machine and returns its write bits.
@@ -730,9 +651,6 @@ func (cfg gaussLearnConfig) logDiscrete(weights []float64, moves []int, cells in
 		}
 		cfg.logf("  state %d  write %c  move %c  next %d", i+1, discreteBit(weights[i]), shown[i], next)
 	}
-	if code, ok := encodeDiscrete(weights, moves); ok {
-		cfg.logf("  encoding %s", code)
-	}
 	writes, tape := runDiscrete(weights, moves, cells)
 	cfg.logf("  writes %s", writes)
 	cfg.logf("  tape %s", tape)
@@ -741,8 +659,8 @@ func (cfg gaussLearnConfig) logDiscrete(weights []float64, moves []int, cells in
 	if len(states) == len(weights)+1 && states[len(states)-1] != 0 {
 		cfg.logf("  still running")
 	}
-	cfg.logf("  the learned bytes are written as bits and read back")
-	cfg.logf("  text %s", strconv.Quote(discreteText(emissionText(weights, moves, cells))))
+	cfg.logf("  the learned symbol bytes are recorded in a buffer")
+	cfg.logf("  text %s", strconv.Quote(recordSymbols(emissionText(weights, moves, cells))))
 	return writes
 }
 

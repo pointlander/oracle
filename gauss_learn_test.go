@@ -350,16 +350,15 @@ func TestLearnedMachinePrintsDiscreteBits(t *testing.T) {
 	}
 }
 
-func TestDiscreteTextRoundTrip(t *testing.T) {
-	// 7 bytes fit in the 6-bit encoding. 8 bytes do not, so both paths run.
+func TestRecordSymbolsKeepsTheBytes(t *testing.T) {
 	for _, s := range []string{"Hello World!", "Abcdefg", "Abcdefgh"} {
-		if discreteText(s) != s {
+		if recordSymbols(s) != s {
 			t.Fatalf("text %q", s)
 		}
 	}
 	weights := []float64{72, 101, 108, 108, 111}
 	moves := []int{1, 1, 1, 1, 1}
-	got := discreteText(emissionText(weights, moves, 0))
+	got := recordSymbols(emissionText(weights, moves, 0))
 	if got != "Hello" {
 		t.Fatalf("emission %q", got)
 	}
