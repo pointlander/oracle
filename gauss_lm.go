@@ -21,13 +21,16 @@ const lmSampleLen = 160
 
 // lmNode is one context. Children extend it by one older byte. yb and yn are
 // the distinct bytes written after this context and how often each was written.
+// w0 and w1 are the text machine's write weights for this state. A zero byte
+// reads w0. Any other byte reads w1.
 type lmNode struct {
 	kb    []byte
 	ch    []*lmNode
 	yb    []byte
 	yn    []uint32
 	total uint32
-	mu    float64
+	w0    float64
+	w1    float64
 }
 
 func (n *lmNode) find(b byte) *lmNode {
@@ -76,11 +79,12 @@ func (n *lmNode) mode() byte {
 	return best
 }
 
-// gaussLM is a byte language model. The head reads the previous bytes.
-// Each context keeps the bytes that were written after it. The Gaussian
-// write weight is trained on the most common of those bytes, and the hard
-// read is the nearest byte to that weight. A context that was never written
-// backs off to the longest suffix that was.
+// gaussLM is a byte language model on the text machine. The head reads the
+// previous bytes. Each context is a state with two write weights, one for a
+// zero byte and one for any other byte. The weight that rule writes is
+// trained on the most common next byte, and the hard read is the nearest
+// byte of that weight. A context that was never written backs off to the
+// longest suffix that was.
 type gaussLM struct {
 	tau   float64
 	order int
@@ -96,29 +100,40 @@ func newGaussLM(order int, tau float64) *gaussLM {
 	}
 }
 
-// fitContextMean follows the Gaussian-softmax partial until the expected
-// byte matches the observed mean. The step is τ^2, which cancels 1/τ^2.
-// The weight may leave the byte range. That is where a mean near 0 or 255
-// has its expectation.
-func fitContextMean(mean, tau float64, iters int) float64 {
-	mu := 0.0
+// fitContextWrite follows the text machine's write step toward one byte.
+// The step is τ^2 times the symbol partial, the same cancellation a spelled
+// character uses. It stops when that step is negligible. The weight may
+// leave the byte range. That is where a byte at either end has its expectation.
+func fitContextWrite(target byte, tau float64, iters int) float64 {
+	w := 0.0
+	lr := tau * tau
 	for step := 0; step < iters; step++ {
-		_, dmu := symbolLoss(mu, tau, 0)
-		expect := dmu * tau * tau
-		delta := expect - mean
+		_, dmu := symbolLoss(w, tau, int(target))
+		delta := lr * dmu
 		if delta < 1e-4 && delta > -1e-4 {
 			break
 		}
-		mu -= delta
+		w -= delta
 	}
-	return mu
+	return w
 }
 
-// observe counts the bytes written after each context and fits one Gaussian
-// weight to the most common of them. The average byte code is not the target:
-// that average sits between letters, so the hard read misses the text.
-// The trie is rooted at the most recent byte, so a missing longer context
-// stops on the longest suffix that was written.
+// write is the weight for the byte the head just read. A blank context or a
+// zero byte reads w0. Any other byte reads w1. The rule is fixed for a
+// context, so it has no partial.
+func (n *lmNode) write(recent byte, hasRecent bool) float64 {
+	if hasRecent && recent != 0 {
+		return n.w1
+	}
+	return n.w0
+}
+
+// observe counts the bytes written after each context and fits the text
+// write for the byte that context reads. The target is the most common next
+// byte. The average byte code is not the target: that average sits between
+// letters, so the hard read misses the text. The trie is rooted at the most
+// recent byte, so a missing longer context stops on the longest suffix that
+// was written. The most recent byte selects the rule for every longer suffix.
 func (m *gaussLM) observe(data []byte, iters int) {
 	for i, y := range data {
 		node := &m.root
@@ -132,24 +147,35 @@ func (m *gaussLM) observe(data []byte, iters int) {
 			node.addY(y)
 		}
 	}
-	m.root.fit(m.tau, iters, 0, m.seen)
+	m.root.fit(m.tau, iters, 0, m.seen, 0, false)
 }
 
-func (n *lmNode) fit(tau float64, iters, depth int, seen []int) {
+func (n *lmNode) fit(tau float64, iters, depth int, seen []int, recent byte, hasRecent bool) {
 	if n.total == 0 {
 		return
 	}
-	n.mu = fitContextMean(float64(n.mode()), tau, iters)
+	w := fitContextWrite(n.mode(), tau, iters)
+	if hasRecent && recent != 0 {
+		n.w1 = w
+	} else {
+		n.w0 = w
+	}
 	if depth < len(seen) {
 		seen[depth]++
 	}
-	for _, c := range n.ch {
-		c.fit(tau, iters, depth+1, seen)
+	for i, c := range n.ch {
+		next := recent
+		has := hasRecent
+		if !has {
+			next = n.kb[i]
+			has = true
+		}
+		c.fit(tau, iters, depth+1, seen, next, has)
 	}
 }
 
-// weight is the Gaussian write for ctx in chronological order, oldest byte
-// first. It is the weight tests read back.
+// weight is the text write for ctx in chronological order, oldest byte
+// first. The most recent byte selects the rule. It is the weight tests read back.
 func (m *gaussLM) weight(ctx []byte) float64 {
 	n := &m.root
 	for i := len(ctx) - 1; i >= 0; i-- {
@@ -159,23 +185,33 @@ func (m *gaussLM) weight(ctx []byte) float64 {
 		}
 		n = c
 	}
-	return n.mu
+	if len(ctx) == 0 {
+		return n.w0
+	}
+	return n.write(ctx[len(ctx)-1], true)
 }
 
 // longest is the deepest stored context at i, reading at most order bytes.
-func (m *gaussLM) longest(data []byte, i, order int) *lmNode {
+// The second result is the write for the most recent byte of that context.
+func (m *gaussLM) longest(data []byte, i, order int) (*lmNode, float64) {
 	if order > m.order {
 		order = m.order
 	}
 	node := &m.root
+	var recent byte
+	has := false
 	for k := 1; k <= order && i >= k; k++ {
 		c := node.find(data[i-k])
 		if c == nil {
 			break
 		}
 		node = c
+		if !has {
+			recent = data[i-k]
+			has = true
+		}
 	}
-	return node
+	return node, node.write(recent, has)
 }
 
 // score is the mean cross-entropy and the nearest-byte accuracy of data[start:].
@@ -187,17 +223,17 @@ func (m *gaussLM) score(data []byte, order int) (nll float64, correct, total int
 	}
 	cache := make(map[key]float64)
 	for i := range data {
-		node := m.longest(data, i, order)
+		node, w := m.longest(data, i, order)
 		y := data[i]
 		ck := key{node, y}
 		loss, ok := cache[ck]
 		if !ok {
-			loss, _ = symbolLoss(node.mu, m.tau, int(y))
+			loss, _ = symbolLoss(w, m.tau, int(y))
 			cache[ck] = loss
 		}
 		nll += loss
 		total++
-		if nearestByte(node.mu) == y {
+		if nearestByte(w) == y {
 			correct++
 		}
 	}
@@ -210,7 +246,8 @@ func (m *gaussLM) score(data []byte, order int) (nll float64, correct, total int
 // sampleWritten draws one of the bytes written in this context, in proportion
 // to how often it was written. The longest stored context is used.
 func (m *gaussLM) sampleWritten(data []byte, i int, rng *rand.Rand) byte {
-	return drawNode(m.longest(data, i, m.order), rng)
+	node, _ := m.longest(data, i, m.order)
+	return drawNode(node, rng)
 }
 
 func drawNode(n *lmNode, rng *rand.Rand) byte {
@@ -275,8 +312,10 @@ func learnGaussLM(cfg lmConfig) error {
 	cfg.logf("  file %s", cfg.Path)
 	cfg.logf("  %d bytes, train %d, val %d, order %d", len(data), len(train), len(val), cfg.Order)
 	cfg.logf("  the head reads the previous %d bytes", cfg.Order)
-	cfg.logf("  each context's weight is trained on its most common next byte")
-	cfg.logf("  the hard read is the nearest byte to that weight")
+	cfg.logf("  each context is a text state with a write for 0 and a write for any other byte")
+	cfg.logf("  a blank context or a zero byte reads 0")
+	cfg.logf("  the weight that rule writes is trained on the most common next byte")
+	cfg.logf("  the hard read is the nearest byte of that weight")
 	cfg.logf("  an unseen context backs off to the longest suffix that was written")
 	cfg.logf("  loss is the cross-entropy of a Gaussian softmax over byte codes")
 	m := newGaussLM(cfg.Order, cfg.Temp)
@@ -290,7 +329,7 @@ func learnGaussLM(cfg lmConfig) error {
 	_, uniVa, _ := m.score(val, 0)
 	cfg.logf("train loss %.4f  acc %d/%d", trLoss, trHit, trN)
 	cfg.logf("val   loss %.4f  acc %d/%d", vaLoss, vaHit, vaN)
-	cfg.logf("unigram acc train %d/%d  val %d/%d  byte %q", uniTr, trN, uniVa, vaN, nearestByte(m.root.mu))
+	cfg.logf("unigram acc train %d/%d  val %d/%d  byte %q", uniTr, trN, uniVa, vaN, nearestByte(m.root.w0))
 	prompt := []byte("To be, or not to be")
 	rng := rand.New(rand.NewSource(cfg.Seed))
 	sample := m.continueText(prompt, lmSampleLen, rng)

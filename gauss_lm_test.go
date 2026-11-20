@@ -11,14 +11,54 @@ import (
 	"testing"
 )
 
-func TestContextMeanMatchesTheExpectation(t *testing.T) {
-	const mean = 80.0
+func TestContextWriteMatchesTheByte(t *testing.T) {
+	const target = byte(80)
 	const tau = 8.0
-	mu := fitContextMean(mean, tau, 16)
-	_, dmu := symbolLoss(mu, tau, 0)
+	w := fitContextWrite(target, tau, 16)
+	_, dmu := symbolLoss(w, tau, 0)
 	expect := dmu * tau * tau
-	if math.Abs(expect-mean) > 1e-2 {
-		t.Fatalf("expectation %.4f mean %.4f at mu %.4f", expect, mean, mu)
+	if math.Abs(expect-float64(target)) > 1e-2 {
+		t.Fatalf("expectation %.4f target %d at %.4f", expect, target, w)
+	}
+	if nearestByte(w) != target {
+		t.Fatalf("nearest %d", nearestByte(w))
+	}
+}
+
+func contextNode(m *gaussLM, ctx []byte) *lmNode {
+	n := &m.root
+	for i := len(ctx) - 1; i >= 0; i-- {
+		n = n.find(ctx[i])
+		if n == nil {
+			return nil
+		}
+	}
+	return n
+}
+
+func TestZeroByteUsesTheOtherWrite(t *testing.T) {
+	// Newest byte 0 reads w0. Newest byte 'b' reads w1, including the longer
+	// context whose older byte is 0.
+	text := []byte{0, 'b', 'Z', 0, 'b', 'Z'}
+	m := newGaussLM(2, 8)
+	m.observe(text, 8)
+	zero := contextNode(m, []byte{0})
+	bee := contextNode(m, []byte{'b'})
+	longer := contextNode(m, []byte{0, 'b'})
+	if zero == nil || bee == nil || longer == nil {
+		t.Fatal("missing context")
+	}
+	if nearestByte(zero.w0) != 'b' || zero.w1 != 0 {
+		t.Fatalf("zero w0 %.3f w1 %.3f", zero.w0, zero.w1)
+	}
+	if nearestByte(bee.w1) != 'Z' || bee.w0 != 0 {
+		t.Fatalf("b w0 %.3f w1 %.3f", bee.w0, bee.w1)
+	}
+	if nearestByte(longer.w1) != 'Z' || longer.w0 != 0 {
+		t.Fatalf("longer w0 %.3f w1 %.3f", longer.w0, longer.w1)
+	}
+	if nearestByte(m.weight([]byte{0, 'b'})) != 'Z' || nearestByte(m.weight([]byte{'Z', 0})) != 'b' {
+		t.Fatalf("weight %q %q", nearestByte(m.weight([]byte{0, 'b'})), nearestByte(m.weight([]byte{'Z', 0})))
 	}
 }
 
