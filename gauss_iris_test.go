@@ -29,16 +29,15 @@ func TestIrisWeightPartialMatchesFiniteDifference(t *testing.T) {
 		x: [irisFeatures]float64{1, -1, 0.5, 2},
 		y: 1,
 	}}
-	// The bias is a nonzero byte, so every measurement step reads rule 1.
+	// Measurements 1, -1, 0.5, 2. Byte 0 selects write 0.
 	const bias = 10.0
-	w0 := []float64{0, 0, 0, 0}
+	w0 := []float64{9, 9, 9, 9}
 	w1 := []float64{0.2, -0.3, 0.4, 0.1}
 	const tau = irisTau
 	gb, g0, g1, _ := irisGrad(bias, w0, w1, rows, tau, 3)
-	for i := range g0 {
-		if g0[i] != 0 {
-			t.Fatalf("unread write 0[%d] %.6f", i, g0[i])
-		}
+	// Fired rules are 1, 0, 1, 1. The other write of each step is unread.
+	if g0[0] != 0 || g1[1] != 0 || g0[2] != 0 || g0[3] != 0 {
+		t.Fatalf("unread g0 %v g1 %v", g0, g1)
 	}
 	const eps = 1e-4
 	_, _, _, lp := irisGrad(bias+eps, w0, w1, rows, tau, 3)
@@ -47,14 +46,14 @@ func TestIrisWeightPartialMatchesFiniteDifference(t *testing.T) {
 	if math.Abs(gb-diff) > 1e-4 {
 		t.Fatalf("bias partial %.6f finite difference %.6f", gb, diff)
 	}
-	up1, dn1 := append([]float64(nil), w1...), append([]float64(nil), w1...)
-	up1[2] += eps
-	dn1[2] -= eps
-	_, _, _, lp = irisGrad(bias, w0, up1, rows, tau, 3)
-	_, _, _, lm = irisGrad(bias, w0, dn1, rows, tau, 3)
+	up0, dn0 := append([]float64(nil), w0...), append([]float64(nil), w0...)
+	up0[1] += eps
+	dn0[1] -= eps
+	_, _, _, lp = irisGrad(bias, up0, w1, rows, tau, 3)
+	_, _, _, lm = irisGrad(bias, dn0, w1, rows, tau, 3)
 	diff = (lp - lm) / (2 * eps)
-	if math.Abs(g1[2]-diff) > 1e-4 {
-		t.Fatalf("weight partial %.6f finite difference %.6f", g1[2], diff)
+	if math.Abs(g0[1]-diff) > 1e-4 {
+		t.Fatalf("weight partial %.6f finite difference %.6f", g0[1], diff)
 	}
 }
 
@@ -67,17 +66,16 @@ func TestIrisProgramReadsTheTape(t *testing.T) {
 	}
 	w0 := []float64{9, 9, 9, 9}
 	w1 := []float64{0.2, -0.3, 0.4, 0.1}
-	sum, rule := irisProgram(w0, w1, tape)
-	want := bias + 0.2*x[0] + -0.3*x[1] + 0.4*x[2] + 0.1*x[3]
+	sum, rule := irisProgram(bias, w0, w1, x)
+	// Measurement bytes are 1, 0, 1, 2, so the fired writes are w1, w0, w1, w1.
+	want := bias + x[0] + x[1] + x[2] + x[3] + w1[0] + w0[1] + w1[2] + w1[3]
 	if math.Abs(sum-want) > 1e-9 {
 		t.Fatalf("sum %.6f want %.6f", sum, want)
 	}
-	if rule[0] != 0 {
-		t.Fatalf("bias rule %d", rule[0])
-	}
-	for i := 1; i < len(rule); i++ {
-		if rule[i] != 1 {
-			t.Fatalf("rule %d at %d", rule[i], i)
+	got := []int{1, 0, 1, 1}
+	for i := range got {
+		if rule[i] != got[i] {
+			t.Fatalf("rule %v", rule)
 		}
 	}
 }
