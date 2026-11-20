@@ -29,40 +29,64 @@ func TestIrisWeightPartialMatchesFiniteDifference(t *testing.T) {
 		x: [irisFeatures]float64{1, -1, 0.5, 2},
 		y: 1,
 	}}
-	// The bias is a nonzero byte, so the feature states read rule 1.
-	w0 := []float64{10, 0, 0, 0, 0}
-	w1 := []float64{0, 0.2, -0.3, 0.4, 0.1}
+	// The bias is a nonzero byte, so every measurement step reads rule 1.
+	const bias = 10.0
+	w0 := []float64{0, 0, 0, 0}
+	w1 := []float64{0.2, -0.3, 0.4, 0.1}
 	const tau = irisTau
-	g0, g1, _ := irisGrad(w0, w1, rows, tau, 3)
-	if g0[1] != 0 || g1[0] != 0 {
-		t.Fatalf("unread rules g0[1] %.6f g1[0] %.6f", g0[1], g1[0])
+	gb, g0, g1, _ := irisGrad(bias, w0, w1, rows, tau, 3)
+	for i := range g0 {
+		if g0[i] != 0 {
+			t.Fatalf("unread write 0[%d] %.6f", i, g0[i])
+		}
 	}
 	const eps = 1e-4
-	up0, dn0 := append([]float64(nil), w0...), append([]float64(nil), w0...)
-	up0[0] += eps
-	dn0[0] -= eps
-	_, _, lp := irisGrad(up0, w1, rows, tau, 3)
-	_, _, lm := irisGrad(dn0, w1, rows, tau, 3)
+	_, _, _, lp := irisGrad(bias+eps, w0, w1, rows, tau, 3)
+	_, _, _, lm := irisGrad(bias-eps, w0, w1, rows, tau, 3)
 	diff := (lp - lm) / (2 * eps)
-	if math.Abs(g0[0]-diff) > 1e-4 {
-		t.Fatalf("bias partial %.6f finite difference %.6f", g0[0], diff)
+	if math.Abs(gb-diff) > 1e-4 {
+		t.Fatalf("bias partial %.6f finite difference %.6f", gb, diff)
 	}
 	up1, dn1 := append([]float64(nil), w1...), append([]float64(nil), w1...)
-	up1[3] += eps
-	dn1[3] -= eps
-	_, _, lp = irisGrad(w0, up1, rows, tau, 3)
-	_, _, lm = irisGrad(w0, dn1, rows, tau, 3)
+	up1[2] += eps
+	dn1[2] -= eps
+	_, _, _, lp = irisGrad(bias, w0, up1, rows, tau, 3)
+	_, _, _, lm = irisGrad(bias, w0, dn1, rows, tau, 3)
 	diff = (lp - lm) / (2 * eps)
-	if math.Abs(g1[3]-diff) > 1e-4 {
-		t.Fatalf("weight partial %.6f finite difference %.6f", g1[3], diff)
+	if math.Abs(g1[2]-diff) > 1e-4 {
+		t.Fatalf("weight partial %.6f finite difference %.6f", g1[2], diff)
+	}
+}
+
+func TestIrisProgramReadsTheTape(t *testing.T) {
+	const bias = 10.0
+	x := [irisFeatures]float64{1, -1, 0.5, 2}
+	tape := irisInscribe(bias, x)
+	if len(tape) != irisTapeCells || tape[0] != bias || tape[1] != 1 || tape[3] != 0.5 {
+		t.Fatalf("tape %v", tape)
+	}
+	w0 := []float64{9, 9, 9, 9}
+	w1 := []float64{0.2, -0.3, 0.4, 0.1}
+	sum, rule := irisProgram(w0, w1, tape)
+	want := bias + 0.2*x[0] + -0.3*x[1] + 0.4*x[2] + 0.1*x[3]
+	if math.Abs(sum-want) > 1e-9 {
+		t.Fatalf("sum %.6f want %.6f", sum, want)
+	}
+	if rule[0] != 0 {
+		t.Fatalf("bias rule %d", rule[0])
+	}
+	for i := 1; i < len(rule); i++ {
+		if rule[i] != 1 {
+			t.Fatalf("rule %d at %d", rule[i], i)
+		}
 	}
 }
 
 func TestIrisLossIsTheTextSymbol(t *testing.T) {
 	rows := []irisRow{{y: 1}}
-	w0 := make([]float64, irisStates)
-	w1 := make([]float64, irisStates)
-	_, _, loss := irisGrad(w0, w1, rows, irisTau, 3)
+	w0 := make([]float64, irisFeatures)
+	w1 := make([]float64, irisFeatures)
+	_, _, _, loss := irisGrad(0, w0, w1, rows, irisTau, 3)
 	nll, _ := symbolLoss(0, irisTau, irisClassByte(1, 3))
 	if math.Abs(loss-nll) > 1e-9 {
 		t.Fatalf("loss %.6f symbol %.6f", loss, nll)
@@ -96,12 +120,12 @@ func TestIrisSeparatesOneFeature(t *testing.T) {
 		test = append(test, irisRow{x: [irisFeatures]float64{2, 0, 0, 0}, y: 1})
 	}
 	standardizeIris(train, test)
-	w0, w1, err := fitIris(train, test, 2, 32, irisTau, nil)
+	bias, w0, w1, err := fitIris(train, test, 2, 32, irisTau, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if irisCorrect(test, w0, w1, 2) != len(test) {
-		t.Fatalf("test %d/%d", irisCorrect(test, w0, w1, 2), len(test))
+	if irisCorrect(test, bias, w0, w1, 2) != len(test) {
+		t.Fatalf("test %d/%d", irisCorrect(test, bias, w0, w1, 2), len(test))
 	}
 }
 
@@ -132,11 +156,11 @@ func TestGaussClassifiesIris(t *testing.T) {
 		t.Fatal(err)
 	}
 	standardizeIris(train, test)
-	w0, w1, err := fitIris(train, test, 3, 32, irisTau, nil)
+	bias, w0, w1, err := fitIris(train, test, 3, 32, irisTau, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hit := irisCorrect(test, w0, w1, 3)
+	hit := irisCorrect(test, bias, w0, w1, 3)
 	if hit*10 < len(test)*9 {
 		t.Fatalf("test %d/%d", hit, len(test))
 	}

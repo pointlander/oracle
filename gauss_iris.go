@@ -19,9 +19,9 @@ import (
 // irisFeatures is the number of measurements on each flower.
 const irisFeatures = 4
 
-// irisStates is the text machine that classifies one flower. State 0 writes
-// the bias. Each later state writes one measurement.
-const irisStates = irisFeatures + 1
+// irisTapeCells is the inscribed tape. Cell 0 is the bias. Each later cell
+// is one measurement. The program takes one step per cell.
+const irisTapeCells = irisFeatures + 1
 
 // irisTau is the width of the text-machine symbol softmax. It matches the
 // default -temp of a spelled string.
@@ -217,37 +217,49 @@ func standardizeIris(train, test []irisRow) {
 	apply(test)
 }
 
-// irisWalk runs the text tape machine on one flower. The tape is one cell
-// and the head wraps, so every state writes there and then moves right.
-// A blank cell, or a mean that rounds to byte 0, reads rule 0. Any other
-// byte reads rule 1. That choice is constant, so it has no partial. State 0
-// reads the blank cell and writes the bias. Each later state writes its
-// weight for that read times the measurement. The score is the sum of the
-// writes, which is the finished cell before the mean divides it.
-func irisWalk(w0, w1 []float64, x [irisFeatures]float64) (sum float64, rule []int) {
-	rule = make([]int, irisStates)
-	var sumW float64
+// irisInscribe writes the bias and the measurements on the tape. Cell 0 is
+// the bias. Each later cell is one measurement, in order.
+func irisInscribe(bias float64, x [irisFeatures]float64) []float64 {
+	tape := make([]float64, irisTapeCells)
+	tape[0] = bias
+	for i := 0; i < irisFeatures; i++ {
+		tape[i+1] = x[i]
+	}
+	return tape
+}
+
+// irisProgram combines an inscribed tape. The output cell starts blank, so
+// the first step reads rule 0 and adds the bias. Each later step reads that
+// output. A blank cell, or a mean that rounds to byte 0, selects write 0.
+// Any other byte selects write 1. That choice is constant, so it has no
+// partial. The head walks the measurements from the left. The step adds its
+// weight for that read times the measurement under the head, then moves
+// right. The score is the output sum.
+func irisProgram(w0, w1, tape []float64) (sum float64, rule []int) {
+	rule = make([]int, len(tape))
+	var out float64
 	count := 0
 	head := 0
-	for t := 0; t < irisStates; t++ {
-		pos := wrapCell(head, 1)
+	for t := 0; t < len(tape); t++ {
+		pos := wrapCell(head, len(tape))
 		r := 0
-		if count > 0 && nearestByte(sumW/float64(count)) != 0 {
+		if count > 0 && nearestByte(out/float64(count)) != 0 {
 			r = 1
 		}
 		rule[t] = r
-		w := w0[t]
-		if r == 1 {
-			w = w1[t]
-		}
+		write := tape[pos]
 		if t > 0 {
-			w *= x[t-1]
+			w := w0[t-1]
+			if r == 1 {
+				w = w1[t-1]
+			}
+			write = w * tape[pos]
 		}
-		sumW += w
+		out += write
 		count++
 		head = pos + 1
 	}
-	return sumW, rule
+	return out, rule
 }
 
 // irisClassByte is the text symbol for a class. Class 0 sits at or just
@@ -325,40 +337,43 @@ func classOf(mu float64, nClass int) int {
 	return best
 }
 
-// irisGrad is the mean symbol cross-entropy of the tape sum, and the partial
-// of that mean for each write. The rule that did not fire has partial 0.
-func irisGrad(w0, w1 []float64, rows []irisRow, tau float64, nClass int) (g0, g1 []float64, loss float64) {
-	g0 = make([]float64, irisStates)
-	g1 = make([]float64, irisStates)
+// irisGrad is the mean symbol cross-entropy of the program's output, the
+// partial of that mean for the bias, and the partial for each program write.
+// The rule that did not fire has partial 0.
+func irisGrad(bias float64, w0, w1 []float64, rows []irisRow, tau float64, nClass int) (gb float64, g0, g1 []float64, loss float64) {
+	g0 = make([]float64, irisFeatures)
+	g1 = make([]float64, irisFeatures)
 	n := float64(len(rows))
 	for _, r := range rows {
-		sum, rule := irisWalk(w0, w1, r.x)
+		tape := irisInscribe(bias, r.x)
+		sum, rule := irisProgram(w0, w1, tape)
 		nll, dmu := symbolLoss(sum, tau, irisClassByte(r.y, nClass))
 		loss += nll
 		for t, ruleT := range rule {
-			scale := 1.0
-			if t > 0 {
-				scale = r.x[t-1]
+			if t == 0 {
+				gb += dmu
+				continue
 			}
 			if ruleT == 0 {
-				g0[t] += dmu * scale
+				g0[t-1] += dmu * tape[t]
 			} else {
-				g1[t] += dmu * scale
+				g1[t-1] += dmu * tape[t]
 			}
 		}
 	}
 	loss /= n
-	for t := 0; t < irisStates; t++ {
+	gb /= n
+	for t := 0; t < irisFeatures; t++ {
 		g0[t] /= n
 		g1[t] /= n
 	}
-	return g0, g1, loss
+	return gb, g0, g1, loss
 }
 
-func irisCorrect(rows []irisRow, w0, w1 []float64, nClass int) int {
+func irisCorrect(rows []irisRow, bias float64, w0, w1 []float64, nClass int) int {
 	n := 0
 	for _, r := range rows {
-		sum, _ := irisWalk(w0, w1, r.x)
+		sum, _ := irisProgram(w0, w1, irisInscribe(bias, r.x))
 		if irisClassOf(sum, nClass) == r.y {
 			n++
 		}
@@ -366,33 +381,35 @@ func irisCorrect(rows []irisRow, w0, w1 []float64, nClass int) int {
 	return n
 }
 
-// fitIris follows the partial of the tape sum through the text machine.
-// The text trainer's full step is τ^2 times the partial, which moves one
-// write onto its byte. Flowers want different bytes, and that full step
-// overshoots, so this step is half of that. Weights start at 0.
-func fitIris(train, test []irisRow, nClass, iters int, tau float64, logf func(string, ...any)) (w0, w1 []float64, err error) {
+// fitIris writes the bias and the measurements on the tape, then follows the
+// partial of the program's output. The text trainer's full step is τ^2 times
+// the partial, which moves one write onto its byte. Flowers want different
+// bytes, and that full step overshoots, so this step is half of that.
+// Weights start at 0.
+func fitIris(train, test []irisRow, nClass, iters int, tau float64, logf func(string, ...any)) (bias float64, w0, w1 []float64, err error) {
 	if len(train) == 0 || nClass < 2 || tau <= 0 || iters < 0 {
-		return nil, nil, fmt.Errorf("iris fit needs training rows, two classes, and a positive temperature")
+		return 0, nil, nil, fmt.Errorf("iris fit needs training rows, two classes, and a positive temperature")
 	}
-	w0 = make([]float64, irisStates)
-	w1 = make([]float64, irisStates)
+	w0 = make([]float64, irisFeatures)
+	w1 = make([]float64, irisFeatures)
 	lr := 0.5 * tau * tau
 	for iter := 0; iter <= iters; iter++ {
-		g0, g1, loss := irisGrad(w0, w1, train, tau, nClass)
-		tr := irisCorrect(train, w0, w1, nClass)
-		te := irisCorrect(test, w0, w1, nClass)
+		gb, g0, g1, loss := irisGrad(bias, w0, w1, train, tau, nClass)
+		tr := irisCorrect(train, bias, w0, w1, nClass)
+		te := irisCorrect(test, bias, w0, w1, nClass)
 		if logf != nil && (iter == 0 || iter == iters || iter%8 == 0) {
 			logf("iter %d  loss %.6f  train %d/%d  test %d/%d", iter, loss, tr, len(train), te, len(test))
 		}
 		if iter == iters {
 			break
 		}
-		for t := 0; t < irisStates; t++ {
+		bias -= lr * gb
+		for t := 0; t < irisFeatures; t++ {
 			w0[t] -= lr * g0[t]
 			w1[t] -= lr * g1[t]
 		}
 	}
-	return w0, w1, nil
+	return bias, w0, w1, nil
 }
 
 func learnIris(cfg irisConfig) error {
@@ -416,21 +433,24 @@ func learnIris(cfg irisConfig) error {
 	cfg.logf("  %d flowers, %d features, %d classes", len(rows), irisFeatures, len(names))
 	cfg.logf("  train %d, test %d, seed %d", len(train), len(test), cfg.Seed)
 	cfg.logf("  features are centered and scaled on the training flowers")
-	cfg.logf("  the classifier is the text tape machine")
-	cfg.logf("  the tape is one cell and the head wraps, so every state writes there")
-	cfg.logf("  state 0 writes the bias on the blank cell")
-	cfg.logf("  each later state writes its weight for that read, times the measurement")
-	cfg.logf("  a blank cell or a zero byte reads 0, and any other byte reads 1")
-	cfg.logf("  loss is the text machine's Gaussian softmax of the sum of those writes")
+	cfg.logf("  the bias and the measurements are written on the tape")
+	cfg.logf("  cell 0 is the bias and the next cells are the measurements")
+	cfg.logf("  a program combines them into an output cell")
+	cfg.logf("  the output starts blank, so the first step adds the bias")
+	cfg.logf("  each later step reads that output")
+	cfg.logf("  a blank output or a zero byte reads 0, and any other byte reads 1")
+	cfg.logf("  the step adds that weight times the measurement, then moves right")
+	cfg.logf("  loss is the text machine's Gaussian softmax of the output")
 	cfg.logf("  class bytes are %d apart around byte %d", irisByteGap, irisByteCenter)
-	cfg.logf("  the class is the byte nearest that sum")
+	cfg.logf("  the class is the byte nearest that output")
 	cfg.logf("  the write step is half the temperature squared")
-	w0, w1, err := fitIris(train, test, len(names), cfg.Iters, cfg.Temp, cfg.logf)
+	bias, w0, w1, err := fitIris(train, test, len(names), cfg.Iters, cfg.Temp, cfg.logf)
 	if err != nil {
 		return err
 	}
-	cfg.logf("  write 0  %.3f %.3f %.3f %.3f %.3f", w0[0], w0[1], w0[2], w0[3], w0[4])
-	cfg.logf("  write 1  %.3f %.3f %.3f %.3f %.3f", w1[0], w1[1], w1[2], w1[3], w1[4])
+	cfg.logf("  bias %.3f", bias)
+	cfg.logf("  write 0  %.3f %.3f %.3f %.3f", w0[0], w0[1], w0[2], w0[3])
+	cfg.logf("  write 1  %.3f %.3f %.3f %.3f", w1[0], w1[1], w1[2], w1[3])
 	for y, name := range names {
 		var have, hit int
 		for _, r := range test {
@@ -438,7 +458,7 @@ func learnIris(cfg irisConfig) error {
 				continue
 			}
 			have++
-			sum, _ := irisWalk(w0, w1, r.x)
+			sum, _ := irisProgram(w0, w1, irisInscribe(bias, r.x))
 			if irisClassOf(sum, len(names)) == y {
 				hit++
 			}
