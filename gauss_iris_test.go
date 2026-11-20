@@ -29,33 +29,40 @@ func TestIrisWeightPartialMatchesFiniteDifference(t *testing.T) {
 		x: [irisFeatures]float64{1, -1, 0.5, 2},
 		y: 1,
 	}}
-	w := [irisFeatures]float64{0.2, -0.3, 0.4, 0.1}
-	const b = -0.5
+	// The bias is a nonzero byte, so the feature states read rule 1.
+	w0 := []float64{10, 0, 0, 0, 0}
+	w1 := []float64{0, 0.2, -0.3, 0.4, 0.1}
 	const tau = irisTau
-	gw, gb, _ := irisGrad(w, b, rows, tau, 3)
-	const eps = 1e-4
-	up := w
-	up[2] += eps
-	dn := w
-	dn[2] -= eps
-	_, _, lp := irisGrad(up, b, rows, tau, 3)
-	_, _, lm := irisGrad(dn, b, rows, tau, 3)
-	diff := (lp - lm) / (2 * eps)
-	if math.Abs(gw[2]-diff) > 1e-4 {
-		t.Fatalf("weight partial %.6f finite difference %.6f", gw[2], diff)
+	g0, g1, _ := irisGrad(w0, w1, rows, tau, 3)
+	if g0[1] != 0 || g1[0] != 0 {
+		t.Fatalf("unread rules g0[1] %.6f g1[0] %.6f", g0[1], g1[0])
 	}
-	_, _, lp = irisGrad(w, b+eps, rows, tau, 3)
-	_, _, lm = irisGrad(w, b-eps, rows, tau, 3)
+	const eps = 1e-4
+	up0, dn0 := append([]float64(nil), w0...), append([]float64(nil), w0...)
+	up0[0] += eps
+	dn0[0] -= eps
+	_, _, lp := irisGrad(up0, w1, rows, tau, 3)
+	_, _, lm := irisGrad(dn0, w1, rows, tau, 3)
+	diff := (lp - lm) / (2 * eps)
+	if math.Abs(g0[0]-diff) > 1e-4 {
+		t.Fatalf("bias partial %.6f finite difference %.6f", g0[0], diff)
+	}
+	up1, dn1 := append([]float64(nil), w1...), append([]float64(nil), w1...)
+	up1[3] += eps
+	dn1[3] -= eps
+	_, _, lp = irisGrad(w0, up1, rows, tau, 3)
+	_, _, lm = irisGrad(w0, dn1, rows, tau, 3)
 	diff = (lp - lm) / (2 * eps)
-	if math.Abs(gb-diff) > 1e-4 {
-		t.Fatalf("bias partial %.6f finite difference %.6f", gb, diff)
+	if math.Abs(g1[3]-diff) > 1e-4 {
+		t.Fatalf("weight partial %.6f finite difference %.6f", g1[3], diff)
 	}
 }
 
 func TestIrisLossIsTheTextSymbol(t *testing.T) {
 	rows := []irisRow{{y: 1}}
-	var w [irisFeatures]float64
-	_, _, loss := irisGrad(w, 0, rows, irisTau, 3)
+	w0 := make([]float64, irisStates)
+	w1 := make([]float64, irisStates)
+	_, _, loss := irisGrad(w0, w1, rows, irisTau, 3)
 	nll, _ := symbolLoss(0, irisTau, irisClassByte(1, 3))
 	if math.Abs(loss-nll) > 1e-9 {
 		t.Fatalf("loss %.6f symbol %.6f", loss, nll)
@@ -89,12 +96,12 @@ func TestIrisSeparatesOneFeature(t *testing.T) {
 		test = append(test, irisRow{x: [irisFeatures]float64{2, 0, 0, 0}, y: 1})
 	}
 	standardizeIris(train, test)
-	w, b, err := fitIris(train, test, 2, 32, irisTau, nil)
+	w0, w1, err := fitIris(train, test, 2, 32, irisTau, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if irisCorrect(test, w, b, 2) != len(test) {
-		t.Fatalf("test %d/%d", irisCorrect(test, w, b, 2), len(test))
+	if irisCorrect(test, w0, w1, 2) != len(test) {
+		t.Fatalf("test %d/%d", irisCorrect(test, w0, w1, 2), len(test))
 	}
 }
 
@@ -125,11 +132,11 @@ func TestGaussClassifiesIris(t *testing.T) {
 		t.Fatal(err)
 	}
 	standardizeIris(train, test)
-	w, b, err := fitIris(train, test, 3, 32, irisTau, nil)
+	w0, w1, err := fitIris(train, test, 3, 32, irisTau, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hit := irisCorrect(test, w, b, 3)
+	hit := irisCorrect(test, w0, w1, 3)
 	if hit*10 < len(test)*9 {
 		t.Fatalf("test %d/%d", hit, len(test))
 	}
